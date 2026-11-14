@@ -1,0 +1,57 @@
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleDebug"
+      }
+    },
+
+    /**
+     * THE ONE THAT ANSWERS "IS MY APP ACTUALLY FAST?".
+     *
+     * `distribution: internal` produces a directly installable APK — sideload it
+     * with no store, no review, no account setup beyond a free Expo login.
+     * `buildType: apk` rather than `app-bundle` because an app bundle cannot be
+     * sideloaded.
+     *
+     * `dev: false` is the entire point. It is the default, and it is what makes
+     * this build behave like the app a user would install:
+     *
+     *   - the JS bundle is embedded, so there is no Metro and no dev server
+     *   - `__DEV__` is false, so React runs in production mode
+     *   - the dev-only overhead in react-native, expo-image and Reanimated is
+     *     compiled out
+     *
+     * Expo Go is a DEBUG build, so it pays all of that on every render. Anything
+     * measured there is a worst case, not what a user sees.
+     */
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+
+    /**
+     * Store build. Kept here so it is not invented under pressure later — but
+     * note `com.anonymous.Miori` has to become a real reverse-DNS package
+     * (`com.<yourname>.miori`) before this is usable, and it needs a real release
+     * keystore. See the note in the summary.
+     */
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "expo": {
+    "name": "Miori",
+    "slug": "Miori",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/images/icon.png",
+    "scheme": "miori",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "backgroundColor": "#0b0b10",
+      "package": "com.coolboi018.miori"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "./plugins/withAbiSplits.js",
+      "./plugins/withDisableR8.js",
+      [
+        "expo-navigation-bar",
+        {
+          "enforceContrast": false,
+          "style": "dark"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#000000"
+        }
+      ],
+      "expo-video",
+      "expo-secure-store",
+      "expo-image",
+      "expo-font",
+      "expo-status-bar",
+      "expo-web-browser"
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "expo-navigation-bar": {
+        "enforceContrast": false,
+        "style": "dark"
+      },
+      "eas": {
+        "projectId": "689031c4-c2e1-4a6b-b92e-9db555783732"
+      }
+    }
+  }
+}

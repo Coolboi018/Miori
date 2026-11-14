@@ -1,0 +1,324 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Image } from 'expo-image';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTheme } from '@/lib/ui/useTheme';
+import { font, radii, spacing } from '@/lib/ui/tokens';
+import { AppIcon } from '@/components/ui/AppIcon';
+
+import { getToken } from '@/lib/anilist/auth';
+import { openCharacterSheet } from '@/lib/anime/characterSheet';
+import {
+  fetchProfile,
+  fetchMediaList,
+  type ProfileData,
+  type MediaListEntry,
+  type FavouriteAnime,
+  type FavouriteCharacter,
+} from '@/lib/anilist/lists';
+
+const TABS = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'CURRENT', label: 'Watching' },
+  { key: 'PLANNING', label: 'Planning' },
+  { key: 'COMPLETED', label: 'Completed' },
+  { key: 'PAUSED', label: 'On Hold' },
+  { key: 'DROPPED', label: 'Dropped' },
+  { key: 'REPEATING', label: 'Rewatching' },
+] as const;
+
+type TabKey = (typeof TABS)[number]['key'];
+
+export default function ProfileScreen() {
+  const { color } = useTheme();
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const params = useLocalSearchParams<{ tab?: string }>();
+  const initialTab = (params.tab as TabKey) ?? 'overview';
+
+  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabKey>(initialTab);
+  const [list, setList] = useState<MediaListEntry[]>([]);
+  const [listLoading, setListLoading] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const token = await getToken();
+        if (!token) throw new Error('Not logged in');
+        const p = await fetchProfile(token);
+        if (alive) setProfile(p);
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : 'Failed to load profile');
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const loadList = useCallback(async (status: string) => {
+    if (!profile) return;
+    setListLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error('Not logged in');
+      const entries = await fetchMediaList(token, profile.id, status);
+      setList(entries);
+    } catch {
+      setList([]);
+    } finally {
+      setListLoading(false);
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    if (tab === 'overview') return;
+    void loadList(tab);
+  }, [tab, loadList]);
+
+  const openAnime = useCallback((id: number) => {
+    router.push({ pathname: '/anime/[id]', params: { id: String(id) } });
+  }, [router]);
+
+  if (loading) {
+    return (
+      <View style={[styles.root, { backgroundColor: color.bg.primary, paddingTop: insets.top }]}>
+        <Text style={[styles.loading, { color: color.text.muted }]}>Loading profile…</Text>
+      </View>
+    );
+  }
+
+  if (error || !profile) {
+    return (
+      <View style={[styles.root, { backgroundColor: color.bg.primary, paddingTop: insets.top }]}>
+        <Pressable onPress={() => router.back()} style={styles.backBtn}>
+          <AppIcon name="back" size={22} color={color.text.primary} strokeWidth={2.5} />
+        </Pressable>
+        <Text style={[styles.error, { color: color.status.danger }]}>{error ?? 'No profile'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.root, { backgroundColor: color.bg.primary }]}>
+      <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + spacing.giant }}>
+        {/* Hero */}
+        <View style={styles.hero}>
+          {profile.banner ? (
+            <Image source={{ uri: profile.banner }} style={styles.banner} contentFit="cover" />
+          ) : (
+            <View style={[styles.banner, { backgroundColor: color.bg.surface }]} />
+          )}
+          <View style={styles.heroOverlay} />
+          <Pressable onPress={() => router.back()} style={[styles.backBtn, { top: insets.top + spacing.sm }]}>
+            <AppIcon name="back" size={22} color="#fff" strokeWidth={2.5} />
+          </Pressable>
+          <View style={[styles.heroContent, { paddingTop: insets.top + spacing.xl + spacing.lg }]}>
+            <View style={styles.avatarWrap}>
+              {profile.avatar ? (
+                <Image source={{ uri: profile.avatar }} style={styles.avatar} contentFit="cover" />
+              ) : (
+                <View style={[styles.avatar, { backgroundColor: color.accent.muted, alignItems: 'center', justifyContent: 'center' }]}>
+                  <Text style={{ color: color.text.primary, fontSize: 32, fontFamily: font.bold }}>
+                    {profile.name.charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.name}>{profile.name}</Text>
+          </View>
+        </View>
+
+        {/* Stats */}
+        <View style={[styles.statsCard, { backgroundColor: color.bg.surface }]}>
+          <Stat label="Anime" value={profile.stats.count} color={color} />
+          <Stat label="Episodes" value={profile.stats.episodesWatched} color={color} />
+          <Stat label="Minutes" value={profile.stats.minutesWatched} color={color} />
+          <Stat label="Mean score" value={profile.stats.meanScore.toFixed(1)} color={color} />
+        </View>
+
+        {/* Tabs */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs}>
+          {TABS.map((t) => {
+            const active = tab === t.key;
+            return (
+              <Pressable
+                key={t.key}
+                onPress={() => setTab(t.key)}
+                style={[styles.tab, active && { borderBottomColor: color.accent.base, borderBottomWidth: 2 }]}
+              >
+                <Text style={[styles.tabText, { color: active ? color.text.primary : color.text.muted }]}>
+                  {t.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        {tab === 'overview' ? (
+          <View style={{ paddingHorizontal: spacing.lg }}>
+            <Section title="Favourite anime" color={color}>
+              <HorizontalList items={profile.favourites.anime} onPress={openAnime} color={color} />
+            </Section>
+            <Section title="Favourite characters" color={color}>
+              <CharacterList items={profile.favourites.characters} color={color} />
+            </Section>
+          </View>
+        ) : listLoading ? (
+          <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.xl }]}>Loading…</Text>
+        ) : list.length === 0 ? (
+          <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.xl }]}>Nothing here yet.</Text>
+        ) : (
+          <View style={styles.grid}>
+            {list.map((e, i) => (
+              <Pressable key={`${e.id}-${i}`} onPress={() => openAnime(e.id)} style={styles.gridItem}>
+                {e.cover ? (
+                  <Image source={{ uri: e.cover }} style={styles.gridCover} contentFit="cover" />
+                ) : (
+                  <View style={[styles.gridCover, { backgroundColor: color.bg.surface }]} />
+                )}
+                <Text style={[styles.gridTitle, { color: color.text.primary }]} numberOfLines={2}>
+                  {e.title}
+                </Text>
+                <Text style={[styles.gridMeta, { color: color.text.muted }]}>
+                  {e.progress}
+                  {e.episodes ? `/${e.episodes}` : ''} · {e.score ? e.score.toFixed(1) : '—'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function Stat({ label, value, color }: { label: string; value: any; color: any }) {
+  return (
+    <View style={styles.stat}>
+      <Text style={[styles.statValue, { color: color.text.primary }]}>{value}</Text>
+      <Text style={[styles.statLabel, { color: color.text.muted }]}>{label}</Text>
+    </View>
+  );
+}
+
+function Section({ title, color, children }: { title: string; color: any; children: React.ReactNode }) {
+  return (
+    <View style={{ marginTop: spacing.lg }}>
+      <Text style={[styles.sectionTitle, { color: color.text.muted }]}>{title.toUpperCase()}</Text>
+      {children}
+    </View>
+  );
+}
+
+function HorizontalList({ items, onPress, color }: { items: FavouriteAnime[]; onPress: (id: number) => void; color: any }) {
+  if (items.length === 0) {
+    return <Text style={[styles.empty, { color: color.text.muted }]}>No favourites yet.</Text>;
+  }
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      {items.map((a, i) => (
+        <Pressable key={`${a.id}-${i}`} onPress={() => onPress(a.id)} style={styles.favCard}>
+          {a.cover ? (
+            <Image source={{ uri: a.cover }} style={styles.favCover} contentFit="cover" />
+          ) : (
+            <View style={[styles.favCover, { backgroundColor: color.bg.surface }]} />
+          )}
+          <Text style={[styles.favTitle, { color: color.text.primary }]} numberOfLines={2}>
+            {a.title}
+          </Text>
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+}
+
+function CharacterList({ items, color }: { items: FavouriteCharacter[]; color: any }) {
+  if (items.length === 0) {
+    return <Text style={[styles.empty, { color: color.text.muted }]}>No favourite characters yet.</Text>;
+  }
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      {items.map((c, i) => (
+        <Pressable
+          key={`${c.id}-${i}`}
+          onPress={() => openCharacterSheet({ id: c.id, name: c.name, image: c.image })}
+          style={styles.charCard}
+        >
+          {c.image ? (
+            <Image source={{ uri: c.image }} style={styles.charImg} contentFit="cover" />
+          ) : (
+            <View style={[styles.charImg, { backgroundColor: color.bg.surface }]} />
+          )}
+          <Text style={[styles.charName, { color: color.text.primary }]} numberOfLines={2}>
+            {c.name}
+          </Text>
+        </Pressable>
+      ))}
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  loading: { textAlign: 'center', marginTop: 120, fontSize: 14, fontFamily: font.medium },
+  error: { textAlign: 'center', marginTop: 120, fontSize: 14, fontFamily: font.medium },
+  backBtn: {
+    position: 'absolute',
+    left: spacing.lg,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    zIndex: 2,
+  },
+  hero: { height: 260, position: 'relative' },
+  banner: { ...StyleSheet.absoluteFill },
+  heroOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.45)' },
+  heroContent: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, alignItems: 'center' },
+  avatarWrap: { marginBottom: spacing.sm },
+  avatar: { width: 88, height: 88, borderRadius: 44, borderWidth: 3, borderColor: '#fff', overflow: 'hidden' },
+  name: { color: '#fff', fontSize: 26, fontFamily: font.bold, marginTop: spacing.sm, letterSpacing: -0.4 },
+  handle: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontFamily: font.medium, marginTop: 2 },
+  statsCard: {
+    flexDirection: 'row',
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    justifyContent: 'space-around',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+  },
+  stat: { alignItems: 'center', gap: 2 },
+  statValue: { fontSize: 18, fontFamily: font.bold },
+  statLabel: { fontSize: 10, fontFamily: font.medium, letterSpacing: 0.6, textTransform: 'uppercase' },
+  tabs: { paddingHorizontal: spacing.lg, marginTop: spacing.lg, gap: spacing.sm },
+  tab: { paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabText: { fontSize: 13, fontFamily: font.semibold },
+  sectionTitle: { fontSize: 11, fontFamily: font.bold, letterSpacing: 1.2, marginBottom: spacing.sm, marginTop: spacing.md },
+  empty: { fontSize: 13, fontFamily: font.regular, marginTop: spacing.sm },
+  favCard: { width: 110, marginRight: spacing.md },
+  favCover: { width: 110, height: 165, borderRadius: radii.md, marginBottom: spacing.xs },
+  favTitle: { fontSize: 12, fontFamily: font.medium, lineHeight: 15 },
+  charCard: { width: 80, marginRight: spacing.md, alignItems: 'center' },
+  charImg: { width: 72, height: 72, borderRadius: 36, marginBottom: spacing.xs },
+  charName: { fontSize: 11, fontFamily: font.medium, textAlign: 'center', lineHeight: 14 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: spacing.lg, gap: spacing.md, marginTop: spacing.md },
+  gridItem: { width: '30%' },
+  gridCover: { width: '100%', aspectRatio: 2 / 3, borderRadius: radii.md, marginBottom: spacing.xs },
+  gridTitle: { fontSize: 12, fontFamily: font.medium, lineHeight: 15 },
+  gridMeta: { fontSize: 10, fontFamily: font.regular, marginTop: 2 },
+});

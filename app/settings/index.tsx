@@ -14,6 +14,9 @@ import { font, radii, spacing } from '@/lib/ui/tokens';
 import { AppIcon, type AppIconName } from '@/components/ui/AppIcon';
 import { useViewer } from '@/lib/auth/queries';
 import { getDiscordToken, fetchDiscordUser, type DiscordUser } from '@/lib/presence/discord';
+import { checkForUpdate, openUpdatePrompt } from '@/lib/updates/store';
+import { updateActionLabel, updateStatusLine } from '@/lib/updates/statusLine';
+import { useUpdateState } from '@/lib/updates/useUpdate';
 
 interface Category {
   key: string;
@@ -23,6 +26,15 @@ interface Category {
   icon: AppIconName;
   /** iOS settings icon tiles are saturated, literal colours — kept literal. */
   tile: string;
+  /**
+   * A row that DOES something instead of pushing a page.
+   *
+   * Only the update check qualifies: everything else here opens a screen of its
+   * own, and a control that lives on the list it is already on has nowhere to
+   * push. Kept as one optional field rather than a `onPress` per entry so the
+   * array stays plain data.
+   */
+  action?: 'checkUpdates';
 }
 
 interface Section {
@@ -55,6 +67,18 @@ const SECTIONS: Section[] = [
   {
     title: 'About',
     items: [
+      // First, because it is the only row here that ACTS — the rest open pages,
+      // and this is the one people come to Settings for after a release.
+      {
+        key: 'updates',
+        title: 'Check for updates',
+        // Replaced at render time from the updater's own state; the array stays
+        // static so ordering never depends on a network result.
+        hint: '',
+        icon: 'reset',
+        tile: '#5e5ce6',
+        action: 'checkUpdates',
+      },
       { key: 'about', title: 'About', hint: 'Version · reset', icon: 'info', tile: '#8e8e93' },
       // Last on purpose: it is the page you read once, not a setting.
       { key: 'developer', title: 'Developer', hint: 'CoolBoi018 · extension repo · how it is made', icon: 'sparkles', tile: '#ff375f' },
@@ -67,6 +91,24 @@ export default function SettingsIndex() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const [duser, setDuser] = useState<DiscordUser | null>(null);
+  // Subscribed once for the whole list: the row's hint and its right-hand word
+  // both come from this, and neither should be a second subscription.
+  const update = useUpdateState();
+
+  /**
+   * The one row on this screen that runs something. A known update re-opens the
+   * card (the same host the launch check uses) instead of re-asking GitHub; a
+   * fresh check fires the request and lets the updater decide whether to open
+   * it.
+   */
+  const onCategoryPress = (cat: Category) => {
+    if (cat.action === 'checkUpdates') {
+      if (update.status === 'available') openUpdatePrompt();
+      else void checkForUpdate();
+      return;
+    }
+    router.push(`/settings/${cat.key}` as never);
+  };
 
   // The shared entry, not a fetch of its own. Three screens were each calling
   // `fetchViewer` on mount for one answer, and none of them would notice an account
@@ -146,7 +188,7 @@ export default function SettingsIndex() {
               {section.items.map((cat, i) => (
                 <Pressable
                   key={cat.key}
-                  onPress={() => router.push(`/settings/${cat.key}` as never)}
+                  onPress={() => onCategoryPress(cat)}
                   accessibilityRole="button"
                   accessibilityLabel={cat.title}
                   style={({ pressed }) => [
@@ -160,9 +202,30 @@ export default function SettingsIndex() {
                   </View>
                   <View style={styles.rowText}>
                     <Text style={[styles.rowTitle, { color: color.text.primary }]}>{cat.title}</Text>
-                    <Text style={[styles.rowHint, { color: color.text.muted }]}>{cat.hint}</Text>
+                    <Text style={[styles.rowHint, { color: color.text.muted }]} numberOfLines={2}>
+                      {cat.action === 'checkUpdates' ? updateStatusLine(update) : cat.hint}
+                    </Text>
                   </View>
-                  <AppIcon name="chevron" size={15} color={color.text.muted} />
+                  {/* The action row says what a tap will do, and stops saying
+                      "Check" the moment there is something to install. The
+                      others keep the disclosure chevron. */}
+                  {cat.action === 'checkUpdates' ? (
+                    <Text
+                      style={[
+                        styles.rowAction,
+                        {
+                          color:
+                            update.status === 'available'
+                              ? color.accent.base
+                              : color.text.muted,
+                        },
+                      ]}
+                    >
+                      {updateActionLabel(update)}
+                    </Text>
+                  ) : (
+                    <AppIcon name="chevron" size={15} color={color.text.muted} />
+                  )}
                 </Pressable>
               ))}
             </View>
@@ -200,4 +263,5 @@ const styles = StyleSheet.create({
   rowText: { flex: 1, minWidth: 0 },
   rowTitle: { fontSize: 16, fontFamily: font.medium },
   rowHint: { fontFamily: font.regular, fontSize: 12, marginTop: 1 },
+  rowAction: { fontSize: 13, fontFamily: font.semibold },
 });

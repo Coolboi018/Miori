@@ -40,10 +40,38 @@
     },
 
     /**
-     * Store build. Kept here so it is not invented under pressure later — but
-     * note `com.anonymous.Miori` has to become a real reverse-DNS package
-     * (`com.<yourname>.miori`) before this is usable, and it needs a real release
-     * keystore. See the note in the summary.
+     * THE GITHUB RELEASE BUILD — the APK that gets attached to a release.
+     *
+     * Deliberately separate from `preview`, even though the two Android blocks
+     * are nearly identical, because they answer different questions: `preview`
+     * is "does it run on my phone", this is "this is the shipped artifact".
+     *
+     *   - `buildType: apk` — an app bundle cannot be installed by a user or
+     *     offered by the in-app updater.
+     *   - `distribution: internal` — installable directly, no store, no review.
+     *   - `autoIncrement: true` — Android installs an update over an existing
+     *     app only when the new `versionCode` is not LOWER. `appVersionSource:
+     *     remote` keeps the number on EAS's side, and this flag makes each build
+     *     bump it, so an update can never be refused as a downgrade.
+     *
+     * Signed with the project's EAS keystore. THAT KEY IS THE APP'S IDENTITY:
+     * regenerate it and every installed copy refuses the update with "App not
+     * installed" (signature mismatch). Never delete or rotate it for this app.
+     */
+    "release": {
+      "distribution": "internal",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
+    },
+
+    /**
+     * Store build — only if Miori is ever published to Play. Kept here so it is
+     * not invented under pressure later. `com.coolboi018.miori` is already a
+     * real reverse-DNS package (the stale `com.anonymous.Miori` note that used
+     * to live here was wrong), and EAS holds a real release keystore, so the
+     * remaining work for a store release is AAB upload + the listing itself.
      */
     "production": {
       "android": {

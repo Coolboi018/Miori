@@ -17,6 +17,9 @@ import { AnimatedSplash } from '@/components/AnimatedSplash';
 import { GatewayView } from '@/components/presence/GatewayView';
 import { ListSheetHost } from '@/components/ui/ListSheetHost';
 import { CharacterSheetHost } from '@/components/ui/CharacterSheetHost';
+import { UpdatePrompt } from '@/components/updates/UpdatePrompt';
+import { AUTO_CHECK_DELAY_MS, checkForUpdate } from '@/lib/updates/store';
+import { SPLASH } from '@/lib/ui/splash';
 import { hydrateSettings } from '@/lib/settings/useSetting';
 import { readSetting, PLAYER_CACHES } from '@/lib/settings/store';
 import {
@@ -215,6 +218,48 @@ export default function RootLayout() {
   useEffect(() => {
     if (loaded && !error) setFontsReady(true);
   }, [loaded, error]);
+
+  /**
+   * THE UPDATE CHECK — once per launch, and late.
+   *
+   * Same discipline as the extension sweep: the first seconds belong to the
+   * home rails and the cache restore, and nobody opens this app for an update
+   * prompt. `AUTO_CHECK_DELAY_MS` keeps the GitHub request (and, if a release is
+   * out, the download the user starts) off that window entirely.
+   *
+   * Web is skipped on purpose: an APK cannot be installed from a browser tab,
+   * so the popup there would only offer a link. Settings → About still works.
+   *
+   * The check itself honours `updates.skippedVersion`, so a release the user
+   * skipped stays quiet until a newer one exists — see `lib/updates/release.ts`.
+   */
+  /**
+   * THE OVERLAY CANNOT OUTLIVE ITSELF.
+   *
+   * `AnimatedSplash` normally ends by calling back from its fade-out. That
+   * callback rides a setTimeout and a Reanimated completion — both of which a
+   * stalled UI thread on a low-end phone can delay past the point where the app
+   * underneath is ready and interactive. The symptom is the one the user
+   * reported as "it gets stuck": a black rectangle over a working app, with the
+   * only exit being a restart.
+   *
+   * This is the backstop, and it is deliberately LATER than the animation
+   * (`SPLASH.watchdogMs` vs `splashTotalMs()`), so it never cuts a healthy fade
+   * — `scripts/check-splash.ts` pins that relationship.
+   */
+  useEffect(() => {
+    if (!animatedSplashVisible) return;
+    const bail = setTimeout(() => setAnimatedSplashVisible(false), SPLASH.watchdogMs);
+    return () => clearTimeout(bail);
+  }, [animatedSplashVisible]);
+
+  useEffect(() => {
+    if (!fontsReady || Platform.OS === 'web') return;
+    const timer = setTimeout(() => {
+      void checkForUpdate({ auto: true });
+    }, AUTO_CHECK_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [fontsReady]);
 
   if (!fontsReady || !playerCacheReady) return null;
 
@@ -420,6 +465,11 @@ function RootLayoutNav() {
         <Stack.Screen name="login" options={{ title: 'AniList login', headerShown: false }} />
         <Stack.Screen name="discord-login" options={{ title: 'Discord login', headerShown: false }} />
       </Stack>
+      {/* The update card, ONCE, for the whole app: the launch check and the
+          Settings → About row open this same host rather than each rendering a
+          modal. Above the Stack because it is a Modal — it has to survive a
+          screen change underneath it. */}
+      <UpdatePrompt />
     </ThemeProvider>
   );
 }

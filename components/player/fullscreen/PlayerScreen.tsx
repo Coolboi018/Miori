@@ -1330,9 +1330,20 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       const t = mediaTitle(m.title);
       presenceTitle.current = t;
       setTitle(t);
+      // FALLBACK ART IS THE ANIME POSTER — NEVER THE APP LOGO.
+      //
+      // An empty `artUrl` means the activity carries no `large_image` at all,
+      // and Discord fills that hole with the APPLICATION's icon: the Miori
+      // logo on the card of an episode whose still has not loaded yet. A
+      // cover almost always exists here, so the card shows the SHOW from the
+      // first frame and upgrades to the episode still when the list lands
+      // (below). The cache key is the same `a<animeId>` the details page uses,
+      // so a poster already uploaded while browsing costs no second round
+      // trip to Discord.
+      const animeCover = m.coverImage?.extraLarge ?? m.coverImage?.large ?? '';
       presenceMedia.current = {
-        artKey: `a${animeId}e${epNum}`,
-        artUrl: '',
+        artKey: `a${animeId}`,
+        artUrl: animeCover,
         pageUrl: `https://anilist.co/anime/${animeId}`,
       };
       updatePresence(t, epNum, presenceMedia.current);
@@ -1374,8 +1385,18 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           setEpisodeTitle(shown.find((e) => e.number === epNum)?.title ?? null);
           const mergedShown = mergeKitsuMeta(shown, peekKitsuEpisodes(animeId));
           const art = mergedShown.find((e) => e.number === epNum)?.poster ?? '';
-          presenceMedia.current = { ...presenceMedia.current!, artUrl: art };
-          updatePresence(t, epNum, presenceMedia.current);
+          if (art) {
+            // The still WINS when there is one — under its OWN cache key.
+            // Reusing the cover's key would make `resolveArt` answer the cached
+            // cover for this url (the cache is keyed by artKey, not by url), so
+            // the card would sit on the poster forever.
+            presenceMedia.current = {
+              ...presenceMedia.current!,
+              artKey: `a${animeId}e${epNum}`,
+              artUrl: art,
+            };
+            updatePresence(t, epNum, presenceMedia.current);
+          }
         } catch {
           /* panel just stays empty */
         }

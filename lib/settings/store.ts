@@ -504,6 +504,16 @@ interface SettingsSchema {
   'extensions.autoUpdate': boolean;
   /** Discord Rich Presence status shown while the app is connected. */
   'presence.status': PresenceStatusKey;
+  /**
+   * The release the user pressed "Skip this version" on, as the normalised
+   * version (`1.2.0`, no `v`). `''` — the default — means nothing is skipped.
+   *
+   * An EQUALITY test is what makes the skip expire on its own: the next release
+   * has a different version, so it prompts again without anything clearing this.
+   * Free-form rather than a union because it is whatever a tag said; the updater
+   * compares it, never branches on it.
+   */
+  'updates.skippedVersion': string;
 }
 
 /** Defaults, and the authoritative list of what exists. */
@@ -540,6 +550,7 @@ export const DEFAULTS: SettingsSchema = {
   'extensions.repoAllowlists': {},
   'extensions.autoUpdate': true,
   'presence.status': 'auto',
+  'updates.skippedVersion': '',
 };
 
 export type SettingKey = keyof SettingsSchema;
@@ -725,6 +736,13 @@ export function isKnownValue(key: SettingKey, value: unknown): boolean {
   }
   if (key === 'presence.status') {
     return PRESENCE_STATUSES.some((s) => s.key === value);
+  }
+  if (key === 'updates.skippedVersion') {
+    // Any string, including the empty default. Its schema default is `''` and
+    // `allowedValues` would otherwise return only `['']` — every stored skip
+    // would be judged unknown and reset, so the prompt would come back on the
+    // next launch and the button would look broken.
+    return typeof value === 'string';
   }
   return allowedValues(key).includes(value as SettingValue<typeof key>);
 }

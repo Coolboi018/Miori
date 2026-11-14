@@ -27,6 +27,8 @@ const HANDLE = 'Coolboi018';
 const PROFILE_URL = `https://github.com/${HANDLE}`;
 const EXTENSIONS_REPO = 'Miori-Extensions';
 const EXTENSIONS_URL = `${PROFILE_URL}/${EXTENSIONS_REPO}`;
+const MAIN_REPO = 'Miori';
+const MAIN_URL = `${PROFILE_URL}/${MAIN_REPO}`;
 const ISSUES_URL = `${EXTENSIONS_URL}/issues`;
 /** GitHub redirects this to the account's current avatar; `size` is the CDN's own resize. */
 const AVATAR_URL = `${PROFILE_URL}.png?size=240`;
@@ -76,7 +78,7 @@ export default function DeveloperSettings() {
 
           <View style={[styles.badge, { backgroundColor: color.accent.muted }]}>
             <AppIcon name="sparkles" size={13} color={color.text.primary} />
-            <Text style={[styles.badgeText, { color: color.text.primary }]}>vibe coded</Text>
+            <Text style={[styles.badgeText, { color: color.text.primary }]}>Miori</Text>
           </View>
 
           <Text style={[styles.tagline, { color: color.text.muted }]}>
@@ -86,6 +88,7 @@ export default function DeveloperSettings() {
 
           <View style={styles.heroButtons}>
             <LinkButton label="GitHub profile" icon="account" primary onPress={() => openLink(PROFILE_URL)} />
+            <LinkButton label="Miori repo" icon="external" onPress={() => openLink(MAIN_URL)} />
             <LinkButton label="Extensions" icon="database" onPress={() => openLink(EXTENSIONS_URL)} />
           </View>
         </LinearGradient>
@@ -163,13 +166,13 @@ export default function DeveloperSettings() {
         <CardTitle icon="settings" text="Details" />
         <Detail label="App version" value={version} />
         <Detail label="Expo SDK" value="58" />
-        <Detail label="Platforms" value="Android-first · iOS builds" />
+        <Detail label="Platforms" value="Android-only" />
         <Detail label="Made by" value="Ishu (@Coolboi018)" />
-        <Detail label="Source repos" value="Extensions are public · app repo soon" last />
+        <Detail label="Source repos" value="App repo open source · Extensions public" last />
       </Card>
 
       <Text style={[styles.footer, { color: color.text.muted }]}>
-        Built by Ishu · 2026{'\n'}Miori is Japanese for “beautiful”.
+        Built by Ishu · 2026{'\n'}Miori is Japanese for “beautiful”{'\n'}Open source · Android only
       </Text>
     </SettingsPage>
   );

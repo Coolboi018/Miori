@@ -2,7 +2,7 @@
   "expo": {
     "name": "Miori",
     "slug": "Miori",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "miori",
@@ -19,7 +19,10 @@
       },
       "predictiveBackGestureEnabled": false,
       "backgroundColor": "#0b0b10",
-      "package": "com.coolboi018.miori"
+      "package": "com.coolboi018.miori",
+      "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -42,7 +45,8 @@
         {
           "image": "./assets/images/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#000000"
+          "backgroundColor": "#000000",
+          "imageWidth": 168
         }
       ],
       "expo-video",

@@ -2,6 +2,9 @@
 
 **Anime streaming mobile app** built with **Expo**, **React Native**, and **TypeScript**.
 
+[![GitHub Stars](https://img.shields.io/github/stars/Coolboi018/Miori?style=for-the-badge)](https://github.com/Coolboi018/Miori)
+[![GitHub Forks](https://img.shields.io/github/forks/Coolboi018/Miori?style=for-the-badge)](https://github.com/Coolboi018/Miori)
+
 ---
 
 ## 📖 What is Miori?
@@ -9,6 +12,9 @@
 Miori is a mobile anime streaming application with a **modular extension system**. Browse episodes, stream videos, and manage your watch history — all with a clean, lightweight UI that runs smoothly even on low-end devices.
 
 > **Developer:** Ishu (CoolBoi018)  
+> **GitHub:** [Coolboi018](https://github.com/Coolboi018)  
+> **Miori Repo:** [https://github.com/Coolboi018/Miori](https://github.com/Coolboi018/Miori)  
+> **Miori-Extensions Repo:** [https://github.com/Coolboi018/Miori-Extensions](https://github.com/Coolboi018/Miori-Extensions)  
 > **License:** MIT  
 > **Platform:** Android (APK), Web (Expo)
 

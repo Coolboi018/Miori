@@ -11,10 +11,13 @@
     "aes-js": "^3.1.2",
     "eslint-config-expo": "~58.0.4",
     "expo": "^58.0.0",
+    "expo-application": "~58.1.2",
     "expo-blur": "~58.0.5",
     "expo-constants": "~58.0.13",
+    "expo-file-system": "~58.0.13",
     "expo-font": "~58.0.10",
     "expo-image": "~58.0.17",
+    "expo-intent-launcher": "~58.0.3",
     "expo-linear-gradient": "~58.0.3",
     "expo-linking": "~58.0.14",
     "expo-navigation-bar": "~58.0.4",
@@ -59,9 +62,11 @@
     "check:health": "npx tsx scripts/check-player-health.ts",
     "check:failover": "npx tsx scripts/check-failover-budget.ts",
     "check:srcpref": "npx tsx scripts/check-source-pref.ts",
+    "check:updates": "npx tsx scripts/check-updates.ts",
     "check:scrub": "npx tsx scripts/check-player-scrub.ts",
     "check:subs": "npx tsx scripts/check-subtitles.ts",
-    "check:motion": "npx tsx scripts/check-sweep-spans.ts && npx tsx scripts/check-crossfade.ts"
+    "check:motion": "npx tsx scripts/check-sweep-spans.ts && npx tsx scripts/check-crossfade.ts",
+    "check:splash": "npx tsx scripts/check-splash.ts"
   },
   "private": true
 }

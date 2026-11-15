@@ -25,7 +25,8 @@
 
 import { memo } from 'react';
 import { Image } from 'expo-image';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import { useTheme } from '@/lib/ui/useTheme';
 import { alpha } from '@/lib/ui/color';
 import { coverAccent, coverPlate } from '@/lib/ui/accent';
@@ -96,7 +97,7 @@ export const MediaBannerCard = memo(function MediaBannerCard({
         : color.text.muted;
 
   return (
-    <Pressable
+    <RoundedPressable
       onPress={() => onPress(media)}
       // Hold to edit the list — see PosterCard's note. `Pressability` suppresses
       // `onPress` once a long press has fired, so a held banner does not navigate.
@@ -104,15 +105,15 @@ export const MediaBannerCard = memo(function MediaBannerCard({
           delayLongPress={LIST_LONG_PRESS_MS}
       accessibilityRole="button"
       accessibilityLabel={title}
-      android_ripple={{ color: alpha(color.text.primary, 0.14), foreground: true }}
-      style={({ pressed }) => [
+      radius={radii.lg}
+      tint={alpha(color.text.primary, 0.14)}
+      style={[
         styles.card,
         {
           width,
           height,
           backgroundColor: plate,
           borderColor: color.border.muted,
-          opacity: pressed ? 0.85 : 1,
         },
       ]}
     >
@@ -173,7 +174,7 @@ export const MediaBannerCard = memo(function MediaBannerCard({
 
       {/* The show's own colour, where art meets the card's edge. */}
       <View style={[styles.accentLine, { backgroundColor: accent }]} pointerEvents="none" />
-    </Pressable>
+    </RoundedPressable>
   );
 });
 

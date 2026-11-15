@@ -34,7 +34,8 @@
 
 import { Image } from 'expo-image';
 import { memo, useCallback } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import type { AiringItem } from '@/lib/anilist/schedule';
 import { mediaTitle } from '@/lib/anilist';
 import { alpha } from '@/lib/ui/color';
@@ -80,19 +81,19 @@ export const NextUpCard = memo(function NextUpCard({
 
   return (
     <View style={styles.slot}>
-      <Pressable
+      <RoundedPressable
         onPress={press}
         accessibilityRole="button"
         accessibilityLabel={`Next up: ${title}, ${episodeLabel(airing.episode)}, ${dayLabel} at ${clockTime(
           airing.airingAt
         )}, ${countdown(airing.airingAt, now)}`}
-        android_ripple={{ color: alpha(color.text.primary, 0.14), foreground: true }}
-        style={({ pressed }) => [
+        radius={radii.lg}
+        tint={alpha(color.text.primary, 0.14)}
+        style={[
           styles.card,
           {
             backgroundColor: plate,
             borderColor: color.border.muted,
-            opacity: pressed ? 0.85 : 1,
           },
         ]}
       >
@@ -154,7 +155,7 @@ export const NextUpCard = memo(function NextUpCard({
         </View>
 
         <View style={[styles.accentLine, { backgroundColor: accent }]} pointerEvents="none" />
-      </Pressable>
+      </RoundedPressable>
     </View>
   );
 });

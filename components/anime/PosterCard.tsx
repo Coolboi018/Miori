@@ -54,7 +54,8 @@
 
 import { Image } from 'expo-image';
 import { memo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import { coverPlate } from '@/lib/ui/accent';
 import { useTheme } from '@/lib/ui/useTheme';
 import { font, layout, radii } from '@/lib/ui/tokens';
@@ -143,7 +144,7 @@ export const PosterCard = memo(function PosterCard({
   if (!framed) {
     return (
       <View style={{ width }}>
-        <Pressable
+        <RoundedPressable
           onPress={() => onPress(media)}
           // WARM ON TOUCH-DOWN, not on press. Every card here opens the detail
           // screen, and the finger lands ~80–150ms before the lift — which is
@@ -169,10 +170,9 @@ export const PosterCard = memo(function PosterCard({
           delayLongPress={LIST_LONG_PRESS_MS}
           accessibilityRole="button"
           accessibilityLabel={title}
-          // `borderless: false` bounds the ripple to this view's rounded
-          // shape — the poster's — rather than the whole column.
-          android_ripple={{ color: color.accent.glow, borderless: false }}
-          style={({ pressed }) => [styles.cleanArt, pressed ? styles.pressed : null]}
+          radius={12}
+          tint={color.accent.glow}
+          style={styles.cleanArt}
         >
           {/* The art well IS the touch target: full tile radius, ripple
               clipped by its own overflow, nothing else in here. */}
@@ -190,7 +190,7 @@ export const PosterCard = memo(function PosterCard({
               />
             ) : null}
           </View>
-        </Pressable>
+        </RoundedPressable>
 
         {showProgress ? (
           <View style={[styles.progressClean, { backgroundColor: color.accent.muted }]}>
@@ -232,7 +232,7 @@ export const PosterCard = memo(function PosterCard({
   // FRAMED — one card, art inset in it, caption on the card body.
   // ------------------------------------------------------------------
   return (
-    <Pressable
+    <RoundedPressable
       onPress={() => onPress(media)}
       // Warm the detail payload on touch-down — see the clean variant's note.
       onPressIn={() => {
@@ -252,20 +252,18 @@ export const PosterCard = memo(function PosterCard({
           delayLongPress={LIST_LONG_PRESS_MS}
       accessibilityRole="button"
       accessibilityLabel={title}
-      // Framework-drawn, so press feedback never waits on the JS thread —
-      // the thread that is busy decoding posters while you tap.
-      android_ripple={{ color: color.accent.glow, foreground: true }}
+      radius={10}
+      tint={color.accent.glow}
       // The card body IS the Pressable: surface, hairline frame and the
       // ripple mask are one view. At 80 mounted tiles this is the tile's
       // native-view budget — art well and caption are its only children.
-      style={({ pressed }) => [
+      style={[
         styles.card,
         {
           width,
           backgroundColor: color.bg.surface,
           borderColor: color.border.muted,
         },
-        pressed ? styles.pressed : null,
       ]}
     >
       {/* The art well: inset by the card's 4px padding. Radius follows the
@@ -315,7 +313,7 @@ export const PosterCard = memo(function PosterCard({
           ) : null}
         </View>
       </View>
-    </Pressable>
+    </RoundedPressable>
   );
 });
 

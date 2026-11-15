@@ -56,7 +56,8 @@
 
 import { memo, useCallback } from 'react';
 import { Image } from 'expo-image';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import Svg, { Circle } from 'react-native-svg';
 
 
@@ -332,7 +333,7 @@ const ChartRow = memo(function ChartRow({
   const press = useCallback(() => onSelect(media), [onSelect, media]);
 
   return (
-    <Pressable
+    <RoundedPressable
       onPress={press}
       // Hold to edit the list, exactly as a poster tile does — see PosterCard's
       // note for the gesture and for why `onPress` needs no guard.
@@ -346,10 +347,10 @@ const ChartRow = memo(function ChartRow({
       delayLongPress={LIST_LONG_PRESS_MS}
       accessibilityRole="button"
       accessibilityLabel={`Number ${rank}, ${title}`}
-      android_ripple={{ color: color.accent.glow, foreground: true }}
-      style={({ pressed }) => [
+      radius={10}
+      tint={color.accent.glow}
+      style={[
         styles.row,
-        { opacity: pressed ? 0.75 : 1 },
         !isLast && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: color.border.muted },
       ]}
     >
@@ -454,7 +455,7 @@ const ChartRow = memo(function ChartRow({
       ) : (
         <View style={styles.ringPlaceholder} />
       )}
-    </Pressable>
+    </RoundedPressable>
   );
 });
 

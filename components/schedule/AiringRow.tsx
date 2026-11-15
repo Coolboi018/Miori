@@ -32,7 +32,8 @@
 
 import { Image } from 'expo-image';
 import { memo, useCallback } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import type { AiringItem } from '@/lib/anilist/schedule';
 import { mediaTitle } from '@/lib/anilist';
 import { alpha } from '@/lib/ui/color';
@@ -134,12 +135,13 @@ export const AiringRow = memo(function AiringRow({
   const press = useCallback(() => onPress(item), [onPress, item]);
 
   return (
-    <Pressable
+    <RoundedPressable
       onPress={press}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${episodeLabel(item.episode)}, ${time}, ${rel}`}
-      android_ripple={{ color: color.accent.glow, foreground: true }}
-      style={({ pressed }) => [
+      radius={isLast ? radii.lg : 0}
+      tint={color.accent.glow}
+      style={[
         styles.row,
         {
           borderLeftColor: color.border.muted,
@@ -150,7 +152,6 @@ export const AiringRow = memo(function AiringRow({
           borderBottomWidth: isLast ? StyleSheet.hairlineWidth : 0,
           borderBottomLeftRadius: isLast ? radii.lg : 0,
           borderBottomRightRadius: isLast ? radii.lg : 0,
-          opacity: pressed ? 0.75 : 1,
         },
       ]}
     >
@@ -211,7 +212,7 @@ export const AiringRow = memo(function AiringRow({
           ) : null}
         </View>
       </View>
-    </Pressable>
+    </RoundedPressable>
   );
 });
 

@@ -24,7 +24,8 @@
 
 import { Image } from 'expo-image';
 import { memo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import { coverPlate } from '@/lib/ui/accent';
 import { useTheme } from '@/lib/ui/useTheme';
 import { font, layout, radii, spacing } from '@/lib/ui/tokens';
@@ -84,7 +85,7 @@ export const MediaRow = memo(function MediaRow({
     .join('  ·  ');
 
   return (
-    <Pressable
+    <RoundedPressable
       onPress={() => onPress(media)}
       // Warm the detail payload on touch-down — see PosterCard's note. The
       // finger lands ~80–150ms before the lift, and a row here is always on
@@ -100,14 +101,14 @@ export const MediaRow = memo(function MediaRow({
           delayLongPress={LIST_LONG_PRESS_MS}
       accessibilityRole="button"
       accessibilityLabel={title}
-      android_ripple={{ color: color.accent.glow, foreground: true }}
-      style={({ pressed }) => [
+      radius={radii.sm}
+      tint={color.accent.glow}
+      style={[
         styles.row,
         {
           height: MEDIA_ROW_HEIGHT,
           borderBottomWidth: divider ? StyleSheet.hairlineWidth : 0,
           borderBottomColor: color.border.muted,
-          opacity: pressed ? 0.7 : 1,
         },
       ]}
     >
@@ -148,7 +149,7 @@ export const MediaRow = memo(function MediaRow({
         // below it do not shift sideways when the column has to grow.
         <View style={styles.scoreSpace} />
       )}
-    </Pressable>
+    </RoundedPressable>
   );
 });
 

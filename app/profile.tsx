@@ -67,26 +67,37 @@ export default function ProfileScreen() {
   // Discord presence: browsing the AniList profile. The focus callback runs while
   // `profile` may still be null (first load), so a second effect re-fires when it
   // arrives — same shape as the details page.
+  //
+  // When there is no logged-in account (or the fetch failed) we still assert a
+  // card of our own instead of leaving the previous screen's card on the profile
+  // — "Profile" with no artwork/button. A stale card lingering over a screen
+  // that has its own identity is worse than a generic one.
   useFocusEffect(
     useCallback(() => {
-      if (!profile) return;
+      if (profile) {
+        updateBrowsing(profile.name, {
+          artKey: `u${profile.id}`,
+          artUrl: profile.avatar ?? '',
+          pageUrl: `https://anilist.co/user/${profile.name}`,
+          buttonLabel: 'View Profile',
+        });
+      } else if (!loading) {
+        updateBrowsing('Profile');
+      }
+    }, [profile, loading])
+  );
+  useEffect(() => {
+    if (profile) {
       updateBrowsing(profile.name, {
         artKey: `u${profile.id}`,
         artUrl: profile.avatar ?? '',
         pageUrl: `https://anilist.co/user/${profile.name}`,
         buttonLabel: 'View Profile',
       });
-    }, [profile])
-  );
-  useEffect(() => {
-    if (!profile) return;
-    updateBrowsing(profile.name, {
-      artKey: `u${profile.id}`,
-      artUrl: profile.avatar ?? '',
-      pageUrl: `https://anilist.co/user/${profile.name}`,
-      buttonLabel: 'View Profile',
-    });
-  }, [profile]);
+    } else if (!loading) {
+      updateBrowsing('Profile');
+    }
+  }, [profile, loading]);
   const loadList = useCallback(async (status: string) => {
     if (!profile) return;
     setListLoading(true);
@@ -115,6 +126,53 @@ export default function ProfileScreen() {
     return (
       <View style={[styles.root, { backgroundColor: color.bg.primary, paddingTop: insets.top }]}>
         <Text style={[styles.loading, { color: color.text.muted }]}>Loading profile…</Text>
+      </View>
+    );
+  }
+
+  if (error === 'Not logged in' || (!profile && !error)) {
+    // Not-logged-in empty state — make it look like a destination, not a crash.
+    return (
+      <View style={[styles.root, { backgroundColor: color.bg.primary }]}>
+        <View style={[styles.notLoggedIn, { paddingTop: insets.top + spacing.xxxl }]}>
+          <Pressable onPress={() => router.back()} style={[styles.backBtn, { top: insets.top + spacing.sm }]}>
+            <AppIcon name="back" size={22} color={color.text.primary} strokeWidth={2.5} />
+          </Pressable>
+          <View style={[styles.notLoggedInAvatar, { backgroundColor: color.accent.muted }]}>
+            <AppIcon name="user" size={40} color={color.text.secondary} />
+          </View>
+          <Text style={[styles.notLoggedInTitle, { color: color.text.primary }]}>
+            Your AniList profile
+          </Text>
+          <Text style={[styles.notLoggedInSub, { color: color.text.muted }]}>
+            Log in to see your stats, favourites and lists — everything syncs to your
+            AniList account.
+          </Text>
+          <Pressable
+            onPress={() => router.push('/login')}
+            style={({ pressed }) => [
+              styles.notLoggedInBtn,
+              { backgroundColor: color.accent.base, opacity: pressed ? 0.85 : 1 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Log in to AniList"
+          >
+            <AppIcon name="user" size={18} color={color.bg.primary} />
+            <Text style={[styles.notLoggedInBtnText, { color: color.bg.primary }]}>
+              Log in to AniList
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => router.push('/settings/accounts')}
+            style={({ pressed }) => [styles.notLoggedInSecondary, { opacity: pressed ? 0.6 : 1 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Open accounts settings"
+          >
+            <Text style={[styles.notLoggedInSecondaryText, { color: color.text.muted }]}>
+              Manage accounts in Settings
+            </Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
@@ -345,4 +403,34 @@ const styles = StyleSheet.create({
   gridCover: { width: '100%', aspectRatio: 2 / 3, borderRadius: radii.md, marginBottom: spacing.xs },
   gridTitle: { fontSize: 12, fontFamily: font.medium, lineHeight: 15 },
   gridMeta: { fontSize: 10, fontFamily: font.regular, marginTop: 2 },
+  notLoggedIn: { flex: 1, alignItems: 'center', paddingHorizontal: spacing.xxl },
+  notLoggedInAvatar: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.lg,
+  },
+  notLoggedInTitle: { fontSize: 22, fontFamily: font.bold, textAlign: 'center' },
+  notLoggedInSub: {
+    fontSize: 14,
+    fontFamily: font.regular,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xl,
+    maxWidth: 320,
+  },
+  notLoggedInBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+    borderRadius: radii.full,
+  },
+  notLoggedInBtnText: { fontSize: 15, fontFamily: font.semibold },
+  notLoggedInSecondary: { marginTop: spacing.md, paddingVertical: spacing.sm },
+  notLoggedInSecondaryText: { fontSize: 13, fontFamily: font.medium },
 });

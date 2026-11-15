@@ -173,6 +173,8 @@ export interface PresenceMedia {
   artKey: string;
   artUrl: string;
   pageUrl: string;
+  /** Label for the card's button. Defaults to "View Anime". */
+  buttonLabel?: string;
 }
 
 export interface PlaybackState {
@@ -332,7 +334,7 @@ async function applyFrame(f: Frame, seq: number): Promise<void> {
       status: readSetting('presence.status') === 'auto' ? undefined : readSetting('presence.status'),
       ...(DISCORD_APP_ID ? { applicationId: DISCORD_APP_ID } : {}),
       ...(largeImage ? { largeImage, largeText: (title ?? APP_NAME).slice(0, 100) } : {}),
-      ...(media ? { buttons: [{ label: 'View Anime', url: media.pageUrl }] } : {}),
+      ...(media ? { buttons: [{ label: media.buttonLabel ?? 'View Anime', url: media.pageUrl }] } : {}),
       sig: `browse|${title ?? ''}`,
       tier: 'screen' as const,
     });

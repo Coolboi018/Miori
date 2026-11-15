@@ -74,6 +74,7 @@ export default function ProfileScreen() {
         artKey: `u${profile.id}`,
         artUrl: profile.avatar ?? '',
         pageUrl: `https://anilist.co/user/${profile.name}`,
+        buttonLabel: 'View Profile',
       });
     }, [profile])
   );
@@ -83,6 +84,7 @@ export default function ProfileScreen() {
       artKey: `u${profile.id}`,
       artUrl: profile.avatar ?? '',
       pageUrl: `https://anilist.co/user/${profile.name}`,
+      buttonLabel: 'View Profile',
     });
   }, [profile]);
   const loadList = useCallback(async (status: string) => {

@@ -74,12 +74,17 @@ export default function ProfileScreen() {
 
   // Fade-in for the profile content once it arrives.
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const avatarScale = useRef(new Animated.Value(0.6)).current;
   useEffect(() => {
     if (profile) {
       fadeAnim.setValue(0);
-      Animated.timing(fadeAnim, { toValue: 1, duration: 450, useNativeDriver: true }).start();
+      avatarScale.setValue(0.6);
+      Animated.parallel([
+        Animated.timing(fadeAnim, { toValue: 1, duration: 450, useNativeDriver: true }),
+        Animated.spring(avatarScale, { toValue: 1, friction: 6, tension: 60, useNativeDriver: true }),
+      ]).start();
     }
-  }, [profile, fadeAnim]);
+  }, [profile, fadeAnim, avatarScale]);
 
   // Discord presence: browsing the AniList profile. The focus callback runs while
   // `profile` may still be null (first load), so a second effect re-fires when it
@@ -227,7 +232,7 @@ export default function ProfileScreen() {
             <AppIcon name="back" size={22} color="#fff" strokeWidth={2.5} />
           </Pressable>
           <View style={[styles.heroContent, { paddingTop: insets.top + spacing.xl + spacing.lg }]}>
-            <View style={styles.avatarWrap}>
+            <Animated.View style={[styles.avatarWrap, { transform: [{ scale: avatarScale }] }]}>
               {profile.avatar ? (
                 <Image source={{ uri: profile.avatar }} style={styles.avatar} contentFit="cover" />
               ) : (
@@ -237,7 +242,7 @@ export default function ProfileScreen() {
                   </Text>
                 </View>
               )}
-            </View>
+            </Animated.View>
             <Text style={styles.name}>{profile.name}</Text>
           </View>
         </View>
@@ -258,7 +263,15 @@ export default function ProfileScreen() {
               <Pressable
                 key={t.key}
                 onPress={() => setTab(t.key)}
-                style={[styles.tab, active && { borderBottomColor: color.accent.base, borderBottomWidth: 2 }]}
+                style={[
+                  styles.tab,
+                  active && {
+                    borderBottomColor: color.accent.base,
+                    borderBottomWidth: 2,
+                    backgroundColor: color.accent.muted,
+                    borderRadius: radii.sm,
+                  },
+                ]}
               >
                 <Text style={[styles.tabText, { color: active ? color.text.primary : color.text.muted }]}>
                   {t.label}

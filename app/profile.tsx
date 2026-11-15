@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Image } from 'expo-image';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/ui/useTheme';
 import { font, radii, spacing } from '@/lib/ui/tokens';
 import { AppIcon } from '@/components/ui/AppIcon';
 
 import { getToken } from '@/lib/anilist/auth';
+import { updateBrowsing } from '@/lib/presence/discord';
 import { openCharacterSheet } from '@/lib/anime/characterSheet';
 import {
   fetchProfile,
@@ -63,6 +64,27 @@ export default function ProfileScreen() {
     };
   }, []);
 
+  // Discord presence: browsing the AniList profile. The focus callback runs while
+  // `profile` may still be null (first load), so a second effect re-fires when it
+  // arrives — same shape as the details page.
+  useFocusEffect(
+    useCallback(() => {
+      if (!profile) return;
+      updateBrowsing(profile.name, {
+        artKey: `u${profile.id}`,
+        artUrl: profile.avatar ?? '',
+        pageUrl: `https://anilist.co/user/${profile.name}`,
+      });
+    }, [profile])
+  );
+  useEffect(() => {
+    if (!profile) return;
+    updateBrowsing(profile.name, {
+      artKey: `u${profile.id}`,
+      artUrl: profile.avatar ?? '',
+      pageUrl: `https://anilist.co/user/${profile.name}`,
+    });
+  }, [profile]);
   const loadList = useCallback(async (status: string) => {
     if (!profile) return;
     setListLoading(true);

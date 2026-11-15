@@ -13,7 +13,7 @@ import { useTheme } from '@/lib/ui/useTheme';
 import { font, radii, spacing } from '@/lib/ui/tokens';
 import { AppIcon, type AppIconName } from '@/components/ui/AppIcon';
 import { useViewer } from '@/lib/auth/queries';
-import { getDiscordToken, fetchDiscordUser, type DiscordUser } from '@/lib/presence/discord';
+import { getDiscordToken, fetchDiscordUser, type DiscordUser, updateBrowsing } from '@/lib/presence/discord';
 import { checkForUpdate, openUpdatePrompt } from '@/lib/updates/store';
 import { updateActionLabel, updateStatusLine } from '@/lib/updates/statusLine';
 import { useUpdateState } from '@/lib/updates/useUpdate';
@@ -129,6 +129,7 @@ export default function SettingsIndex() {
   useFocusEffect(
     useCallback(() => {
       void refresh();
+      updateBrowsing('Settings');
     }, [refresh])
   );
 

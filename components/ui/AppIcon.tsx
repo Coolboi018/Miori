@@ -28,6 +28,7 @@ import Play from 'lucide-react-native/icons/play';
 import Pause from 'lucide-react-native/icons/pause';
 import Star from 'lucide-react-native/icons/star';
 import X from 'lucide-react-native/icons/x';
+import Pencil from 'lucide-react-native/icons/pencil';
 import Share2 from 'lucide-react-native/icons/share-2';
 import Bookmark from 'lucide-react-native/icons/bookmark';
 import BookmarkCheck from 'lucide-react-native/icons/bookmark-check';
@@ -140,6 +141,8 @@ const ICONS = {
   chevronUp: ChevronUp,
   /** The selected tick inside the filter sheet. */
   check: Check,
+  /** Marks a value in the list editor as one you can type over, not just tap. */
+  edit: Pencil,
   /** "On hold" in the list editor — a bookmark reads as "set aside". */
   bookmark: Bookmark,
   /** "Reset", next to the filter pills. */

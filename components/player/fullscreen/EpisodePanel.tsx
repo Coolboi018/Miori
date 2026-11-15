@@ -34,6 +34,14 @@ export interface PanelEpisode {
   /** Resume position in seconds, or 0. Drives the per-row progress hairline. */
   position?: number;
   duration?: number | null;
+  /**
+   * Set by the caller when AniList — not this device — owns what counts as
+   * watched. A deliberate reset on AniList has to be expressible here too, so
+   * the row cannot keep ticking off a local position the tracker has already
+   * forgotten. Same contract as `EpisodeRow.watchedOverride` on the details
+   * page, so the two lists cannot disagree about a title.
+   */
+  watchedOverride?: boolean;
 }
 
 export const EpisodePanel = memo(function EpisodePanel({
@@ -225,9 +233,15 @@ const EpisodeRow = memo(function EpisodeRow({
   /** The row's Y offset within the list, reported on layout. */
   onMeasure?: (y: number) => void;
 }) {
-  const watched = (episode.position ?? 0) > 0;
-  const frac =
-    watched && episode.duration ? Math.min(1, (episode.position ?? 0) / episode.duration) : 0;
+  // AniList-watched draws a FULL hairline rather than none. The hairline is how
+  // this panel says "seen", so an episode the tracker counts as watched has to
+  // keep reading that way even though its local position is withheld — hence
+  // the override coming first, before the ratio that needs a position.
+  const frac = episode.watchedOverride
+    ? 1
+    : episode.duration && (episode.position ?? 0) > 0
+      ? Math.min(1, (episode.position ?? 0) / episode.duration)
+      : 0;
 
   return (
     <Pressable

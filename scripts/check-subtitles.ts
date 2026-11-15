@@ -53,7 +53,7 @@ const { readFileSync } = require('node:fs');
 
 declare const process: { cwd(): string; exit(code: number): never };
 
-import { cueAt, parseVTT, type Cue } from '../lib/subtitles/vtt';
+import { cueAt, cueAtSync, formatSubtitleDelay, parseVTT, type Cue } from '../lib/subtitles/vtt';
 import {
   DEFAULT_POSITION_FRAC,
   DEFAULT_SUBTITLE_STYLE_KEYS,
@@ -177,6 +177,82 @@ check(
 check(
   'a zero-length cue is dropped at parse, so it cannot shadow its neighbours',
   parseVTT(['WEBVTT', '', '00:00:01.000 --> 00:00:01.000', 'degenerate', '', '00:00:01.000 --> 00:00:03.000', 'real'].join('\n')).length === 1
+);
+
+// ===========================================================================
+// 1b. The sync offset shifts the LOOKUP, never the cues
+// ===========================================================================
+//
+// Subtitles are authored against one release and played against another, so the
+// same file can land early on one title and late on the next. The correction is
+// one number in the settings, applied where the playhead is turned into a cue.
+//
+// THE SIGN CONVENTION IS THE THING THAT BREAKS IF NOBODY PINS IT. The user says
+// "the audio comes before the subs" and reaches for "faster"; the slider has to
+// agree with them about which way that is. Here POSITIVE means LATER — the
+// subtitle waits — and NEGATIVE means EARLIER. The whole implementation is a
+// single subtraction inside `cueAtSync`, and both the player and the label draw
+// from it, so this suite is the only place the convention can be checked.
+//
+// The zero path matters too: an install that never opens this setting must be
+// bit-for-bit the player it was before, which is why zero (and a non-finite
+// value from a half-written setting) short-circuits straight to `cueAt`.
+console.log('\n[sync offset]');
+
+check(
+  'a ZERO offset is exactly `cueAt` — the common case does not go through a second path',
+  [0, 5, 10, 12.5, 30, -0.001].every((t) => cueAtSync(CONTIGUOUS, t, 0) === cueAt(CONTIGUOUS, t))
+);
+check(
+  'a non-finite offset falls back to `cueAt` rather than making every lookup NaN',
+  cueAtSync(CONTIGUOUS, 10, NaN) === cueAt(CONTIGUOUS, 10) &&
+    cueAtSync(CONTIGUOUS, 10, Infinity) === cueAt(CONTIGUOUS, 10) &&
+    cueAtSync(CONTIGUOUS, 10, -Infinity) === cueAt(CONTIGUOUS, 10)
+);
+check(
+  'POSITIVE = LATER: the cue authored at 10s is still the previous one at 10s when delayed 1s',
+  cueAtSync(CONTIGUOUS, 10, 1000)?.text === 'first',
+  `got ${JSON.stringify(cueAtSync(CONTIGUOUS, 10, 1000)?.text)}`
+);
+check(
+  'POSITIVE = LATER: it arrives once the playhead reaches 11s',
+  cueAtSync(CONTIGUOUS, 11, 1000)?.text === 'second'
+);
+check(
+  'POSITIVE = LATER: at t=0 the offset looks before the track, which shows nothing',
+  cueAtSync(CONTIGUOUS, 0, 1000) === null
+);
+check(
+  'NEGATIVE = EARLIER: at 9s the cue authored to start at 10s is already up',
+  cueAtSync(CONTIGUOUS, 9, -1000)?.text === 'second',
+  `got ${JSON.stringify(cueAtSync(CONTIGUOUS, 9, -1000)?.text)}`
+);
+check(
+  'the HALF-SECOND case that prompted this lands on the right side of the boundary',
+  cueAtSync(CONTIGUOUS, 10.4, 500)?.text === 'first' &&
+    cueAtSync(CONTIGUOUS, 10.5, 500)?.text === 'second'
+);
+
+check('an offset of zero reads as "In sync"', formatSubtitleDelay(0) === 'In sync');
+check(
+  'a negative offset names the direction in words, not a signed millisecond count',
+  formatSubtitleDelay(-500) === '0.50s earlier',
+  formatSubtitleDelay(-500)
+);
+check(
+  'a positive offset names the other direction',
+  formatSubtitleDelay(500) === '0.50s later',
+  formatSubtitleDelay(500)
+);
+check(
+  'an offset that rounds to zero still reads "In sync"',
+  formatSubtitleDelay(0.4) === 'In sync',
+  formatSubtitleDelay(0.4)
+);
+check(
+  'a non-finite offset formats as in sync rather than printing NaN',
+  formatSubtitleDelay(NaN) === 'In sync',
+  formatSubtitleDelay(NaN)
 );
 
 // ===========================================================================
@@ -607,9 +683,30 @@ console.log('\n[player wiring]');
   ];
   const ok = expected.every(([k, v]) => new RegExp(`'${k}':\\s*'${v}'`).test(store));
   check('the store defaults match the module defaults', ok, expected.map(([k, v]) => `${k}=${v}`).join(' '));
+
+  // `subs.delayMs` is numeric, so it cannot ride the string-key loop above.
+  // Zero is the only safe default: any other value silently re-times every track
+  // on an install that never asked for a correction.
+  check(
+    'the sync default is zero, so an untouched install is re-timed by nothing',
+    /'subs\.delayMs':\s*0\s*,/.test(store),
+    store.match(/'subs\.delayMs':[^,\n]*/)?.[0] ?? 'no subs.delayMs default found'
+  );
+  check(
+    'the sync offset is constrained to a seekable range, not unbounded',
+    /SUBTITLE_DELAY_MIN\s*=\s*-\d+/.test(store) && /SUBTITLE_DELAY_MAX\s*=\s*\d+/.test(store)
+  );
+  // `Slider`'s built-in ticks read "Bottom … Top" — positional words, which on a
+  // timing control are simply wrong. The sync slider must supply its own, and
+  // they must be DERIVED from the bounds: a hand-typed "±2s" beside a bound that
+  // later moved to ±3s would label the middle of the track "2s".
+  check(
+    'the sync slider derives its own ticks from the delay bounds rather than taking Slider’s positional defaults',
+    /SUBTITLE_DELAY_MARKS[\s\S]{0,300}?SUBTITLE_DELAY_MIN[\s\S]{0,120}?SUBTITLE_DELAY_MAX/.test(store)
+  );
   check(
     'the store validates every subtitle key rather than falling through to the enumeration',
-    ['subs.size', 'subs.position', 'subs.positionFrac', 'subs.background', 'subs.language'].every(
+    ['subs.size', 'subs.position', 'subs.positionFrac', 'subs.background', 'subs.language', 'subs.delayMs'].every(
       (k) => store.includes(`key === '${k}'`)
     )
   );

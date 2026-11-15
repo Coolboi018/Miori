@@ -12,6 +12,20 @@ import { useTheme } from '@/lib/ui/useTheme';
 import { font, layout, radii, spacing } from '@/lib/ui/tokens';
 import { fmtDuration } from './format';
 
+/**
+ * LOCAL WATCHED THRESHOLD — 85%, not 95% (15 Nov device ask). The AniList sync
+ * already calls an episode watched at 82% (`SYNC_AT` in PlayerScreen), so the
+ * local mark agreeing only past 95% made the same episode show "Resume" here
+ * while AniList — and `watchedOverride` — called it watched. 85% sits just
+ * above the sync line so the two surfaces tell one story about one episode.
+ *
+ * EXPORTED because the details page asks the same question in its own words:
+ * whether the title as a whole is "Completed" is just a count of rows that pass
+ * this line, and a second hand-picked threshold there would let the button
+ * announce "Completed" over a list still showing an episode unwatched.
+ */
+export const EPISODE_WATCHED_AT = 0.85;
+
 export interface EpisodeRowProps {
   number: number;
   title: string;
@@ -37,7 +51,7 @@ function EpisodeRowBase({
   onPress,
 }: EpisodeRowProps) {
   const { color } = useTheme();
-  const watched = watchedOverride || (duration ? position / duration > 0.95 : false);
+  const watched = watchedOverride || (duration ? position / duration > EPISODE_WATCHED_AT : false);
   const partial = !watched && position > 5;
   const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
 

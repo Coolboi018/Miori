@@ -28,7 +28,7 @@
  * Run with:  npx -y tsx scripts/check-aired-episodes.ts
  */
 
-import { clampToAired, episodesToShow, nothingAiredYet, releasedCount } from '../lib/anilist/episodes';
+import { clampToAired, episodesToShow, nextPlayableEpisode, nothingAiredYet, releasedCount } from '../lib/anilist/episodes';
 import type { MediaDetail } from '../lib/anilist';
 
 /**
@@ -356,6 +356,56 @@ function main() {
     'the chunk accumulator dedupes by episode number',
     /const seen = new Set<number>\(\)/.test(raw) && /if \(seen\.has\(n\)\) continue;/.test(raw),
     'overlapping chunk windows will double-serve rows (the One Piece 1274-for-1174 crash)'
+  );
+
+  // --- auto-advance: the episode the player may hand the viewer to ----------
+  // The 15 Nov device report: the player sat parked on the ended frame forever.
+  // The rule must be releasedCount, not the season total — advancing by
+  // `epNum < episodes` walks an airing show into an unaired episode.
+  console.log('\nauto-advance availability');
+  check(
+    'the last AIRED episode of an airing show does not advance',
+    nextPlayableEpisode(1, kyoufu) === null,
+    `would resolve into unaired episode ${nextPlayableEpisode(1, kyoufu)}`
+  );
+  check(
+    'mid-season advances to the next aired episode',
+    nextPlayableEpisode(4, midway) === 5
+  );
+  check(
+    'the last aired of a mid-season show does not advance',
+    nextPlayableEpisode(5, midway) === null,
+    `episodes 6-9 exist in the season but have not aired`
+  );
+  check(
+    'a finished show advances up to its final episode',
+    nextPlayableEpisode(12, finished) === 13
+  );
+  check(
+    'the FINAL episode of a finished show does not advance',
+    nextPlayableEpisode(13, finished) === null
+  );
+  check(
+    'an unreleased title never advances',
+    nextPlayableEpisode(1, unreleased) === null
+  );
+  check(
+    'the only aired episode of an episodes:null show does not advance',
+    nextPlayableEpisode(1, noTotal) === null,
+    'episode 1 is the last one that exists (nextAiringEpisode: 2)'
+  );
+  check(
+    'an episodes:null airing show advances to its aired count',
+    nextPlayableEpisode(1, noTotalDeep) === 2 && nextPlayableEpisode(2, noTotalDeep) === 3
+  );
+  check(
+    'no evidence (no total, no status, no schedule) stays put',
+    nextPlayableEpisode(1, noEvidence) === null,
+    'guessing high lands on a resolve failure mid-binge'
+  );
+  check(
+    'a bad route param (0/NaN) never advances',
+    nextPlayableEpisode(0, finished) === null && nextPlayableEpisode(NaN, finished) === null
   );
 
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');

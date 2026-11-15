@@ -75,6 +75,10 @@ import type { MenuRow } from './Menu';
 import {
   SUBTITLE_BACKGROUNDS,
   SUBTITLE_COLORS,
+  SUBTITLE_DELAY_MARKS,
+  SUBTITLE_DELAY_MAX,
+  SUBTITLE_DELAY_MIN,
+  SUBTITLE_DELAY_STEP,
   SUBTITLE_POSITIONS,
   SUBTITLE_SIZES,
   type SubtitleBackgroundKey,
@@ -83,6 +87,7 @@ import {
   type SubtitleSizeKey,
 } from '@/lib/settings/store';
 import { SUBTITLE_TYPEGRAPHY } from '@/lib/subtitles/style';
+import { formatSubtitleDelay } from '@/lib/subtitles/vtt';
 
 /** The views the panel can show. The screen's `menu` state is this union. */
 export type PanelView = 'root' | 'speed' | 'quality' | 'source' | 'subs' | 'subsSettings';
@@ -93,6 +98,8 @@ export interface SubsStyleValue {
   positionFrac: number;
   background: SubtitleBackgroundKey;
   color: SubtitleColorKey;
+  /** Sync correction, ms. Positive = later, negative = earlier. See `cueAtSync`. */
+  delayMs: number;
 }
 
 /** The custom-value row the screen appends to the speed rows. */
@@ -314,16 +321,22 @@ function Group({
 /** One slider block inside a group box. */
 function SliderBlock({
   label,
+  accessory,
   children,
 }: {
   label: string;
+  /** Optional control pinned to the right of the label row — a Reset, today. */
+  accessory?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <View style={styles.sliderBlock}>
-      <Text style={styles.sliderLabel} numberOfLines={1}>
-        {label}
-      </Text>
+      <View style={styles.sliderLabelRow}>
+        <Text style={styles.sliderLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        {accessory}
+      </View>
       {children}
     </View>
   );
@@ -353,6 +366,7 @@ export const SettingsPanel = memo(function SettingsPanel({
   onSubsPositionFrac,
   onSubsBackground,
   onSubsColor,
+  onSubsDelay,
 }: {
   /** The open view, or null. ALWAYS MOUNTED — see the header comment. */
   visible: PanelView | null;
@@ -368,6 +382,7 @@ export const SettingsPanel = memo(function SettingsPanel({
   onSubsPositionFrac: (frac: number) => void;
   onSubsBackground: (key: SubtitleBackgroundKey) => void;
   onSubsColor: (key: SubtitleColorKey) => void;
+  onSubsDelay: (ms: number) => void;
 }) {
   // Latch the open content: while `visible` is non-null the card renders the
   // live props; once it goes null the screen's prop ternaries fall through,
@@ -815,6 +830,48 @@ export const SettingsPanel = memo(function SettingsPanel({
                     </View>
                   </View>
                 </Group>
+
+                {/* Sync lives HERE, in the player, because it is the one
+                    subtitle setting that cannot be judged from a preview: you
+                    have to hear the line and see it land. The label spells out
+                    which WAY the correction points — a bare "−500" would make
+                    the viewer guess — and the Reset is there because the
+                    slider's middle is a fraction of a degree wide on a phone. */}
+                <Group label="Sync">
+                  <View style={styles.padBox}>
+                    <SliderBlock
+                      label={formatSubtitleDelay(style.delayMs)}
+                      accessory={
+                        style.delayMs !== 0 ? (
+                          <Pressable
+                            onPress={() => onSubsDelay(0)}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Reset subtitle sync"
+                            style={({ pressed }) => [
+                              styles.resetBtn,
+                              pressed ? styles.chipPressed : null,
+                            ]}
+                          >
+                            <Text style={styles.resetLabel}>Reset</Text>
+                          </Pressable>
+                        ) : null
+                      }
+                    >
+                      <Slider
+                        value={style.delayMs}
+                        onValueChange={onSubsDelay}
+                        minimumValue={SUBTITLE_DELAY_MIN}
+                        maximumValue={SUBTITLE_DELAY_MAX}
+                        step={SUBTITLE_DELAY_STEP}
+                        marks={SUBTITLE_DELAY_MARKS}
+                      />
+                    </SliderBlock>
+                    <Text style={styles.syncHint}>
+                      Slide left to bring the subtitles earlier, right to push them later.
+                    </Text>
+                  </View>
+                </Group>
               </ScrollView>
             ) : isRoot ? (
               <ScrollView
@@ -1114,10 +1171,43 @@ const styles = StyleSheet.create({
   sliderBlock: {
     gap: 6,
   },
+  // The label row: the value on the left, an optional Reset pinned right. The
+  // label shrinks so a long phrase ("0.75s earlier") never pushes the button
+  // off the card.
+  sliderLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   sliderLabel: {
+    flexShrink: 1,
     color: 'rgba(255,255,255,0.7)',
     fontFamily: font.regular,
     fontSize: 12,
     lineHeight: 16,
+  },
+  // Deliberately quiet: a tinted chip, not a button. Returning to zero is a
+  // correction, not an action, and it must not compete with the slider it sits
+  // above.
+  resetBtn: {
+    paddingHorizontal: 10,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  resetLabel: {
+    color: 'rgba(255,255,255,0.85)',
+    fontFamily: font.semibold,
+    fontSize: 11,
+    lineHeight: 14,
+  },
+  syncHint: {
+    color: 'rgba(255,255,255,0.45)',
+    fontFamily: font.regular,
+    fontSize: 11,
+    lineHeight: 15,
   },
 });

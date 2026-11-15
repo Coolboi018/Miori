@@ -25,7 +25,7 @@ import {
   type ListEntry,
   type MediaListStatus,
 } from '@/lib/anilist/lists';
-import { advancesProgress } from '@/lib/anilist/progress';
+import { advancesProgress, planProgressSync } from '@/lib/anilist/progress';
 import type { MediaDetail } from '@/lib/anilist';
 import { qk } from './keys';
 
@@ -388,104 +388,92 @@ export function useSyncListProgress(mediaId: number) {
 
   return useMutation({
     mutationFn: async (episode: number): Promise<ListEntry> => {
+      /**
+       * READ THE ENTRY BEFORE ANYTHING CAN PATCH IT — the order is the whole
+       * fix, and it is not obvious.
+       *
+       * React Query runs `onMutate` TO COMPLETION before this function, and
+       * `onMutate` used to paint the plan optimistically (forward progress +
+       * the promotion) into this exact cache key. Reading the entry here,
+       * after that paint, meant the plan was computed from its own output: the
+       * cache already said `progress: episode`, `planProgressSync` saw nothing
+       * to advance, and the mutation RESOLVED WITH NO REQUEST AT ALL. Every
+       * tracked entry was affected — Planning and Watching alike — which is
+       * why an episode could be watched to 82% (position saved locally, detail
+       * page updated) while AniList never moved. The device caught it on
+       * 15 Nov; the pure `planProgressSync` was correct in isolation, so the
+       * bug lived entirely in this ordering.
+       *
+       * The optimistic patch therefore moved OUT of `onMutate` and DOWN here,
+       * applied only once the plan is decided. `onMutate` still cancels
+       * in-flight reads and hands `previous` back for the rollback.
+       *
+       * WHY THE CACHE AND NOT A FETCH: a miss is the common and correct
+       * answer — it means untracked, which is exactly the case that needs
+       * promoting — and after the first episode our own `onSuccess` has
+       * written the real entry, so from then on the cache knows. A stale or
+       * absent cache can only ever cause a REDUNDANT status here, never a
+       * wrong one: the worst case is writing CURRENT onto something already
+       * CURRENT, which is a no-op.
+       */
+      const key = qk.listEntry(mediaId);
+      const entry = queryClient.getQueryData<ListEntry | null>(key);
+      const media = queryClient.getQueryData<MediaDetail>(qk.media(mediaId));
+
+      /**
+       * THE PLAN, not a bare guard — see `planProgressSync`.
+       *
+       * The old shape asked only `advancesProgress` and resolved without
+       * writing when it said no, which read as success to the caller: a
+       * PLANNING entry whose cached progress already sat at or past the
+       * watched episode was "marked" with nothing sent, and stayed Planning
+       * forever. The plan adds the one write that guard blocked: promote
+       * Planning → CURRENT on a no-advance watch, STATUS ONLY, so it can never
+       * roll the account's progress backwards.
+       */
+      const plan = planProgressSync(entry, episode, media);
+
+      // Optimistic, and deliberately AFTER the plan: the details page must not
+      // flash "Resume Ep X" for a show about to be marked done, nor paint a
+      // rolled-back number for the moment before the settle.
+      if (plan.write) {
+        patchEntry(queryClient, { key, previous: entry }, {
+          ...(plan.progress !== undefined ? { progress: plan.progress } : null),
+          ...(plan.status ? { status: plan.status } : null),
+        });
+      }
+
+      /**
+       * NOTHING TO SEND IS STILL A RESOLVE, not a failure.
+       *
+       * Returned rather than thrown, because "already at or past this episode"
+       * is the desired end state for the remaining statuses. Throwing would
+       * make the player treat it as a failed write — clear its flag and retry
+       * on a 60s cooldown for the rest of the episode, i.e. a loop that can
+       * never terminate because it can never become true. Resolving also lets
+       * `onSuccess` write the entry we already hold back over the optimistic
+       * patch, and lets the caller mark the episode synced, which is the
+       * honest outcome: there is nothing left to send.
+       */
+      if (!plan.write) return entry!;
+
       const token = await getToken();
       if (!token) throw new Error('Sign in to track progress');
 
-      /**
-       * READ THE CACHED ENTRY RATHER THAN FETCHING IT.
-       *
-       * The cache is the right source here for a reason that is not only the saved
-       * request: this screen deliberately stopped asking AniList what the status is.
-       * A miss is the common and correct answer — it means untracked, which is
-       * exactly the case that needs promoting — and after the first episode our own
-       * `onSuccess` has written the real entry, so from then on the cache knows and
-       * the status field stops being sent.
-       *
-       * A stale or absent cache can only ever cause a REDUNDANT status here, never a
-       * wrong one: the worst case is writing CURRENT onto something already
-       * CURRENT, which is a no-op. Guessing a score or a repeat count would be
-       * different, and is why neither is in this call.
-       */
-      const entry = queryClient.getQueryData<ListEntry | null>(qk.listEntry(mediaId));
-
-      /**
-       * NEVER SEND PROGRESS BACKWARDS — see `advancesProgress`.
-       *
-       * RETURNED RATHER THAN THROWN, because "already at or past this episode" is
-       * the desired end state, not a failure. Throwing would make the watch screen
-       * treat it as a failed write — roll back, clear its in-flight guard, and retry
-       * on a 60s cooldown for the rest of the episode, i.e. a loop that can never
-       * terminate because it can never become true. Resolving also lets `onSuccess`
-       * write the entry we already hold back over the optimistic patch, and lets the
-       * caller mark the episode synced, which is the honest outcome: there is nothing
-       * left to send.
-       */
-      if (!advancesProgress(entry, episode)) return entry!;
-
-      const needsPromotion =
-        entry == null || (entry.status !== 'CURRENT' && entry.status !== 'REPEATING');
-
-      /**
-       * AUTO-COMPLETE ON THE FINALE, BUT ONLY WHEN THE SHOW IS FINISHED.
-       *
-       * Watching the last episode of a finished (not airing) series is, in
-       * practice, finishing it. Promoting to CURRENT forever leaves a "Resume Ep X"
-       * lie on the details page for a title the viewer has actually completed —
-       * which is the complaint this answers.
-       *
-       * Guards, and why each is load-bearing:
-       *  - `media.episodes` must be known and `episode` must reach it. With an
-       *    unknown total we cannot say the viewer hit the finale, and guessing
-       *    would mark half-finished shows complete.
-       *  - The media must NOT be airing (RELEASING/HIATUS). For an airing show
-       *    "episode N" is just the latest available, not the finale — marking
-       *    complete there would be wrong every week.
-       *  - Only promote from CURRENT/PLANNING/untracked. A REPEATING entry's
-       *    progress is supposed to keep climbing past the count, a PAUSED/DROPPED
-       *    entry is a deliberate state the viewer chose, and COMPLETED is already
-       *    done — none of them should be overwritten silently. `needsPromotion`
-       *    alone would have promoted PAUSED/DROPPED to CURRENT, which is the
-       *    existing behaviour we keep for the non-complete case.
-       */
-      const media = queryClient.getQueryData<MediaDetail>(qk.media(mediaId));
-      const total = media?.episodes ?? 0;
-      const airing = media?.status === 'RELEASING' || media?.status === 'HIATUS';
-      const canComplete =
-        total > 0 &&
-        episode >= total &&
-        !airing &&
-        (entry == null || entry.status === 'CURRENT' || entry.status === 'PLANNING');
-
-      const status: MediaListStatus | undefined = canComplete
-        ? 'COMPLETED'
-        : needsPromotion
-          ? 'CURRENT'
-          : undefined;
-
       return apiSaveEntry(token, {
         mediaId,
-        progress: episode,
-        ...(status ? { status } : null),
+        ...(plan.progress !== undefined ? { progress: plan.progress } : null),
+        ...(plan.status ? { status: plan.status } : null),
       });
     },
 
-    onMutate: async (episode) => {
-      const ctx = await beginEntryWrite(queryClient, mediaId);
-      // Mirror the completion decision in the optimistic patch so the details
-      // page does not flash "Resume Ep X" for a show we are about to mark done.
-      const media = queryClient.getQueryData<MediaDetail>(qk.media(mediaId));
-      const total = media?.episodes ?? 0;
-      const airing = media?.status === 'RELEASING' || media?.status === 'HIATUS';
-      const canComplete =
-        total > 0 &&
-        episode >= total &&
-        !airing &&
-        (ctx.previous == null || ctx.previous.status === 'CURRENT' || ctx.previous.status === 'PLANNING');
-      patchEntry(queryClient, ctx, {
-        progress: episode,
-        ...(canComplete ? { status: 'COMPLETED' as const } : null),
-      });
-      return ctx;
+    onMutate: async () => {
+      // Cancel in-flight reads so a slow one cannot land after the optimistic
+      // patch, and capture the pre-write value for the rollback. The PATCH
+      // itself lives in the mutation function now — see the note there for why
+      // painting it here would make the function read its own output and skip
+      // the write entirely.
+      return beginEntryWrite(queryClient, mediaId);
     },
 
     onError: (_err, _episode, ctx) => {

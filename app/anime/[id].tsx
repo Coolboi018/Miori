@@ -82,7 +82,7 @@ import { openListSheet } from '@/lib/list/listSheet';
 import { openCharacterSheet } from '@/lib/anime/characterSheet';
 import { useUserId } from '@/lib/auth/session';
 import { useListEntry } from '@/lib/query/listEntries';
-import { EpisodeRow } from '@/components/anime/EpisodeRow';
+import { EPISODE_WATCHED_AT, EpisodeRow } from '@/components/anime/EpisodeRow';
 import { MediaRail } from '@/components/anime/MediaRail';
 import {
   formatLabel,
@@ -188,6 +188,34 @@ export default function AnimeDetailScreen() {
   // reflects progress synced from another device (or a previous session) even
   // when there is no local resume position on this phone.
   const anilistProgress = entry?.progress ?? 0;
+
+  /**
+   * WHO OWNS "WHAT HAS BEEN WATCHED" FOR THIS TITLE — AniList, or this phone.
+   *
+   * The two records are not additive and must never be OR'd together. A local
+   * resume position says "the playhead was here on this device"; an entry's
+   * `progress` says "this many episodes have been marked watched". Treating
+   * them as two votes for the same question is what let a title reset on
+   * AniList keep printing "Completed" here: every episode still had a local
+   * position from the earlier watch, so local outvoted the entry on every
+   * count — the button, the resume target and every tick in the list.
+   *
+   * So there is exactly one authority, and the entry is it whenever there IS
+   * one. That is also what makes a deliberate reset on AniList expressible at
+   * all: without this, no action taken in the tracker could ever lower what
+   * this screen shows.
+   *
+   * THE OTHER HALF IS NOT AN EDGE CASE. With no entry — signed out, or a title
+   * nobody ever added — local positions are the ONLY record there is, and they
+   * keep driving everything exactly as before. Handing the answer to AniList
+   * unconditionally would blank the progress of every show watched while
+   * signed out, which is the behaviour `lib/progress.ts` exists to provide.
+   *
+   * `undefined` (the entry query still in flight) reads as "no entry" for the
+   * same reason: local is never a lie about this device, so a first paint that
+   * shows local and then defers to the entry is honest in both frames.
+   */
+  const anilistOwnsProgress = entry != null;
 
   useEffect(() => {
     // Driven by the query rather than by the button, so it is right on first
@@ -527,25 +555,33 @@ export default function AnimeDetailScreen() {
     };
   }, [animeId, visibleNums]);
 
-  // Resume from the furthest episode with saved progress, else the first.
-  // Must sit above the early returns below — a hook after one is a
-  // rules-of-hooks violation and breaks the moment an error is set.
+  /**
+   * Where the Watch button goes, decided by the same authority as everything
+   * else on this screen.
+   *
+   * WITH AN ENTRY: `progress + 1`. That number is not a guess about where the
+   * viewer stopped — the 82% rule only counts an episode once it is nearly
+   * over, so `progress` IS the episode in hand and the next one is exactly
+   * where to continue. It also means a title watched to 30% of episode 5 still
+   * resumes at 5 (the entry says 4), which is why deferring to AniList here
+   * loses nothing that the local high-water mark used to provide.
+   *
+   * WITHOUT ONE: the furthest episode with a resume point, as before.
+   *
+   * Must sit above the early returns below — a hook after one is a
+   * rules-of-hooks violation and breaks the moment an error is set.
+   */
   const resumeEp = useMemo(() => {
+    const total = media?.episodes ?? airedEpisodes.length ?? 0;
+    if (anilistOwnsProgress) {
+      const next = anilistProgress + 1;
+      return total > 0 && next > total ? total : next;
+    }
     const started = Object.keys(positions)
       .map(Number)
       .sort((a, b) => b - a)[0];
-    if (started != null) return started;
-    // Fall back to AniList's watched count so a title progressed on another
-    // device (or a previous session) still resumes at the next episode instead
-    // of always starting at episode 1.
-    if (anilistProgress > 0) {
-      const total = media?.episodes ?? airedEpisodes.length ?? 0;
-      const next = anilistProgress + 1;
-      if (total > 0 && next > total) return total;
-      return next;
-    }
-    return 1;
-  }, [positions, anilistProgress, media?.episodes, airedEpisodes.length]);
+    return started ?? 1;
+  }, [positions, anilistProgress, anilistOwnsProgress, media?.episodes, airedEpisodes.length]);
 
   // Direction of the last tab change (+1 right, -1 left), so the content
   // slides in from the same side the pill travelled from. Above the early
@@ -611,7 +647,35 @@ export default function AnimeDetailScreen() {
   const fmt = media ? formatLabel(media.format) : '';
   const perEp = media ? minutesToSeconds(media.duration) : 0;
   const accent = media ? coverAccent(media.coverImage?.color) : color.accent.base;
-  const hasProgress = Object.keys(positions).length > 0 || anilistProgress > 0;
+
+  /**
+   * HOW MANY EPISODES ARE WATCHED, asked of whichever side owns the answer.
+   *
+   * TWO THINGS THIS REPLACES, and the second is why it is a count at all:
+   *
+   *   1. The `||` that made it a union of both records. With AniList tracking
+   *      the title, a local resume position must not be able to answer this —
+   *      see `anilistOwnsProgress`.
+   *
+   *   2. `resumeEp >= total`, which was off by one in the direction that
+   *      matters. `resumeEp` is the NEXT episode, so an entry at
+   *      `progress === total - 1` resumes at `total` and the old test called
+   *      that finished with one episode still outstanding. "Completed" is a
+   *      claim about a COUNT, so it is compared as one now, in both directions.
+   *
+   * The local branch counts with `EPISODE_WATCHED_AT` — the same threshold
+   * `EpisodeRow` ticks a row with — so the button can never say "Completed"
+   * over a list that still shows an episode unwatched.
+   */
+  const totalEpisodes = media?.episodes ?? airedEpisodes.length ?? 0;
+  const watchedCount = anilistOwnsProgress
+    ? anilistProgress
+    : Object.values(positions).filter(
+        (t) => perEp != null && perEp > 0 && t / perEp > EPISODE_WATCHED_AT
+      ).length;
+  const hasProgress = anilistOwnsProgress
+    ? anilistProgress > 0
+    : Object.keys(positions).length > 0;
 
   // What the watch button SAYS, driven by the user's list status rather than
   // by raw progress. A finished title the user has completed must not keep
@@ -625,13 +689,12 @@ export default function AnimeDetailScreen() {
     if (s === 'PAUSED') return 'Paused';
     if (s === 'DROPPED') return 'Dropped';
     if (s === 'PLANNING') return 'Planning';
-    // No list entry (or CURRENT): infer completion from progress so a finished
-    // binge never keeps prompting "Resume Ep X".
-    const total = media?.episodes ?? airedEpisodes.length ?? 0;
-    if (total > 0 && hasProgress && resumeEp >= total) return 'Completed';
+    // CURRENT (or nothing tracked): infer completion from the watched count so
+    // a finished binge never keeps prompting "Resume Ep X".
+    if (totalEpisodes > 0 && watchedCount >= totalEpisodes) return 'Completed';
     return hasProgress ? `Resume Ep ${resumeEp}` : 'Watch now';
   })();
-  const watchIcon = entry?.status === 'COMPLETED' || (media?.episodes ?? airedEpisodes.length ?? 0) > 0 && hasProgress && resumeEp >= (media?.episodes ?? airedEpisodes.length ?? 0)
+  const watchIcon = entry?.status === 'COMPLETED' || (totalEpisodes > 0 && watchedCount >= totalEpisodes)
     ? 'check'
     : 'play';
   const banner = media ? media.bannerImage ?? media.coverImage?.extraLarge : undefined;
@@ -918,7 +981,14 @@ export default function AnimeDetailScreen() {
                   title={item.title ?? `Episode ${item.number}`}
                   thumbnail={item.poster}
                   duration={perEp}
-                  position={positions[item.number] ?? 0}
+                  // A local resume position is DROPPED here, not merged, when
+                  // AniList tracks this title: leaving it in would let this
+                  // device's old positions keep every episode ticked and keep
+                  // drawing a bar under each one, which is the contradiction
+                  // that made an AniList reset invisible. The position still
+                  // does its real job — the player seeks with it — it just
+                  // cannot vote on whether an episode was watched.
+                  position={anilistOwnsProgress ? 0 : positions[item.number] ?? 0}
                   watchedOverride={item.number <= anilistProgress}
                   onPress={() => openEpisode(item.number)}
                 />

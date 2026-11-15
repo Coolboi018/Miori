@@ -21,7 +21,7 @@
  * Run with:  npx tsx scripts/check-progress-sync.ts
  */
 
-import { advancesProgress } from '../lib/anilist/progress';
+import { advancesProgress, planProgressSync } from '../lib/anilist/progress';
 import type { ListEntry } from '../lib/anilist/lists';
 
 let failures = 0;
@@ -105,6 +105,104 @@ function main() {
     'an entry edited down by hand can be moved forward again',
     advancesProgress(entry(2), 3),
     'a symmetric guard would freeze the entry forever'
+  );
+
+  // ======================================================================
+  // THE SYNC PLAN — what a watch may actually send (15 Nov device report)
+  // ======================================================================
+  console.log('\nprogress sync plan');
+
+  // --- THE BUG THE DEVICE CAUGHT ---------------------------------------
+  // A PLANNING entry whose cached progress already sits at or past the watched
+  // episode used to resolve the mutation with NOTHING sent — the caller read
+  // that as success ("marked"), and the entry sat in Planning forever, because
+  // the only write that would have promoted it was the one the guard skipped.
+  // The plan promotes Planning → CURRENT on ANY watched episode, status only.
+  const promoted = planProgressSync(entry(12, 'PLANNING'), 3);
+  check(
+    'a PLANNING entry past the watched episode is still promoted',
+    promoted.write === true && promoted.status === 'CURRENT',
+    `the old shape resolved with no write at all (got ${JSON.stringify(promoted)})`
+  );
+  check(
+    'the promotion sends NO progress — it can never roll the account back',
+    promoted.progress === undefined,
+    'a status-only write must not carry an absolute progress value'
+  );
+
+  // --- the forward path is byte-for-byte what the mutation always sent ---
+  const forward = planProgressSync(entry(0, 'PLANNING'), 1);
+  check(
+    'a fresh PLANNING entry advances and promotes in one write',
+    forward.write && forward.progress === 1 && forward.status === 'CURRENT'
+  );
+  const plain = planProgressSync(entry(5, 'CURRENT'), 6, { episodes: 12 });
+  check(
+    'a CURRENT entry on a new episode sends progress and no status',
+    plain.write && plain.progress === 6 && plain.status === undefined
+  );
+  const untracked = planProgressSync(null, 1);
+  check(
+    'an untracked title writes progress + CURRENT',
+    untracked.write && untracked.progress === 1 && untracked.status === 'CURRENT'
+  );
+  const unloaded = planProgressSync(undefined, 1);
+  check(
+    'a not-yet-loaded entry writes too — undefined is not "already ahead"',
+    unloaded.write && unloaded.progress === 1 && unloaded.status === 'CURRENT'
+  );
+
+  // --- the guard cases: a rewatch of a deliberate state sends nothing ---
+  check(
+    'CURRENT past the episode sends nothing',
+    planProgressSync(entry(5, 'CURRENT'), 2).write === false
+  );
+  check(
+    'CURRENT level with the episode sends nothing',
+    planProgressSync(entry(5, 'CURRENT'), 5).write === false
+  );
+  check(
+    'REPEATING is judged on progress alone — past sends nothing',
+    planProgressSync(entry(9, 'REPEATING'), 3).write === false
+  );
+  check(
+    'REPEATING behind still climbs',
+    (() => { const p = planProgressSync(entry(2, 'REPEATING'), 3); return p.write && p.progress === 3 && p.status === undefined; })(),
+    'a REPEATING entry must not be flipped out of REPEATING by a forward write'
+  );
+  check(
+    'PAUSED is a deliberate state — a silent rewatch does not promote it',
+    planProgressSync(entry(12, 'PAUSED'), 3).write === false
+  );
+  check(
+    'DROPPED is a deliberate state — a silent rewatch does not promote it',
+    planProgressSync(entry(12, 'DROPPED'), 3).write === false
+  );
+  check(
+    'COMPLETED past the episode sends nothing',
+    planProgressSync(entry(12, 'COMPLETED'), 3).write === false
+  );
+
+  // --- the finale rule, carried over from the old canComplete ----------
+  const finale = planProgressSync(entry(11, 'CURRENT'), 12, { episodes: 12, status: 'FINISHED' });
+  check(
+    'the finale of a finished show completes',
+    finale.write && finale.progress === 12 && finale.status === 'COMPLETED'
+  );
+  const airingFinale = planProgressSync(entry(11, 'CURRENT'), 12, { episodes: 12, status: 'RELEASING' });
+  check(
+    'episode N of an AIRING show is never "the finale"',
+    airingFinale.write && airingFinale.progress === 12 && airingFinale.status === undefined
+  );
+  const unknownTotal = planProgressSync(entry(11, 'CURRENT'), 12, { episodes: null });
+  check(
+    'an unknown total can never complete',
+    unknownTotal.write && unknownTotal.status === undefined
+  );
+  const planningFinale = planProgressSync(entry(12, 'PLANNING'), 12, { episodes: 12, status: 'FINISHED' });
+  check(
+    'a PLANNING entry at the finale of a finished show COMPLETES, not just promotes',
+    planningFinale.write && planningFinale.progress === undefined && planningFinale.status === 'COMPLETED'
   );
 
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');

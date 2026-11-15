@@ -93,7 +93,7 @@ import {
   SPEED_STEPS,
   type SpeedState,
 } from '@/lib/player/speed';
-import { cueAt, parseVTT, type Cue } from '@/lib/subtitles/vtt';
+import { cueAtSync, parseVTT, type Cue } from '@/lib/subtitles/vtt';
 import { resolveSubtitleStyle } from '@/lib/subtitles/style';
 import { NO_TRACK, SUBTITLE_OFF, pickTrack, preferenceFor } from '@/lib/subtitles/select';
 import { clearPosition, loadPosition, loadPositions, savePosition, isSynced, markSynced } from '@/lib/progress';
@@ -102,15 +102,18 @@ import { fetchText } from '@/lib/extensions/fetch';
 import { listVariants, type HlsVariant } from '@/lib/extensions/hls';
 import type { Container, EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
 import { clearPresence, releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
-import { fetchMedia, mediaTitle } from '@/lib/anilist';
-import { episodesToShow } from '@/lib/anilist/episodes';
+import { fetchMedia, mediaTitle, type MediaDetail } from '@/lib/anilist';
+import { episodesToShow, nextPlayableEpisode } from '@/lib/anilist/episodes';
 import {
   kitsuEpisodeVersion,
   mergeKitsuMeta,
   peekKitsuEpisodes,
   resolveKitsuEpisodes,
 } from '@/lib/media/kitsuEpisodes';
-import { useSyncListProgress } from '@/lib/query/listEntries';
+import { useQueryClient } from '@tanstack/react-query';
+import { useUserId } from '@/lib/auth/session';
+import { useListEntry, useSyncListProgress } from '@/lib/query/listEntries';
+import { qk } from '@/lib/query/keys';
 import { setSetting, readSetting } from '@/lib/settings/store';
 import { useSetting } from '@/lib/settings/useSetting';
 import { font, motion, radii } from '@/lib/ui/tokens';
@@ -139,6 +142,42 @@ const SYNC_AT = 0.82;
 /** Below this a source's runtime is too short to judge "finished" by. */
 const SHORT_EPISODE = 300;
 const MARK_FINISHED = 0.9;
+/**
+ * How long the ended frame holds before auto-advance replaces the route.
+ *
+ * Not zero on purpose: an instant swap at the last decoded frame reads as the
+ * episode was cut off, and it also gives the resume save and the in-flight
+ * 82% sync a beat before the screen tears down (the sync survives unmount —
+ * the promise chain outlives the component — but the beat is still kind).
+ * The manual next-episode button needed no such delay; this is only for the
+ * one the player presses on the viewer's behalf.
+ */
+const AUTO_ADVANCE_DELAY_MS = 1500;
+
+/**
+ * How often the subtitle overlay re-reads the playhead, in ms.
+ *
+ * The active cue is picked inside the `timeUpdate` listener, and `timeUpdate`
+ * fires at `timeUpdateEventInterval` — 0.5s here, because presence, the health
+ * monitor and the auto-skip all read that same tick and none of them want it
+ * faster. That cadence is too coarse for SUBTITLES: a cue boundary that passes
+ * just after one sample is not drawn until the next, so a line can appear up to
+ * HALF A SECOND after its audio — the reported "the audio comes before the
+ * subtitles", and the reason it varies from title to title (it depends where
+ * each cue's start happens to fall between ticks).
+ *
+ * So the overlay gets a tick of its own. It is deliberately NOT a smaller
+ * `timeUpdateEventInterval`: that would change the cadence of every other
+ * reader of the tick to fix a subtitle problem, which is how a fix for one
+ * thing becomes a regression in three. This timer only reads the playhead and
+ * looks up a cue — and `setCue`'s identity check drops the many ticks that land
+ * inside the cue already on screen, so the extra wake-ups cost almost nothing.
+ *
+ * 120ms puts the worst-case lag below the threshold at which lip-sync drift is
+ * perceptible, and is ~4× lighter than the 30ms a frame-rate sampler would use.
+ * The viewer's own sync correction lives on top of this, in `cueAtSync`.
+ */
+const SUBTITLE_TICK_MS = 120;
 
 /**
  * How long a source gets to produce its FIRST FRAME before it is written off.
@@ -344,7 +383,33 @@ export default function LandscapePlayer() {
   const [kitsuVersion, setKitsuVersion] = useState(0);
   const [visibleNums, setVisibleNums] = useState('');
   const [totalEps, setTotalEps] = useState(0);
+  /**
+   * The AniList detail payload this episode was loaded against — kept as state
+   * (not only inside `load()`) because TWO decisions need it after the fetch:
+   * the auto-advance availability check (`nextPlayableEpisode`) and the media
+   * cache seed. Both must see the SAME payload the sync and the panel see.
+   */
+  const [mediaDetail, setMediaDetail] = useState<MediaDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * WHO OWNS "WHAT HAS BEEN WATCHED" IN THE PANEL — the same rule the details
+   * page applies, and for the same reason. The panel used to tick a row on
+   * `position > 0`, so a title reset on AniList kept every old episode marked
+   * here even after the details page had correctly let the entry win.
+   *
+   * With an entry, AniList decides and a local position means only "the
+   * playhead was here on this device"; without one — signed out, or a title
+   * nobody ever tracked — local positions are the only record there is and
+   * keep deciding, exactly as before. `useListEntry` is the same query the
+   * details page and the list sheet read, so the usual route in (details →
+   * play) costs no extra request, and the player's own progress writes patch
+   * that key, which is what makes the panel update as episodes are watched.
+   */
+  const signedIn = useUserId() != null;
+  const { entry: listEntry } = useListEntry(animeId, signedIn);
+  const anilistProgress = listEntry?.progress ?? 0;
+  const anilistOwnsProgress = listEntry != null;
 
   // Derived panel episodes: source list decorated by Kitsu, keyed on the version
   // counter so a late Kitsu page landing re-merges without re-fetching.
@@ -356,9 +421,20 @@ export default function LandscapePlayer() {
       title: e.title,
       poster: e.poster ?? null,
       duration: e.duration ?? null,
-      position: resumePositions[e.number] ?? 0,
+      // A local position is DROPPED, not merged, when AniList tracks the title
+      // — same as the details page. It still does its real job (the player
+      // seeks with it); it just cannot vote on whether an episode was watched.
+      position: anilistOwnsProgress ? 0 : resumePositions[e.number] ?? 0,
+      watchedOverride: anilistOwnsProgress && e.number <= anilistProgress,
     }));
-  }, [sourceEpisodes, resumePositions, animeId, kitsuVersion]);
+  }, [
+    sourceEpisodes,
+    resumePositions,
+    animeId,
+    kitsuVersion,
+    anilistOwnsProgress,
+    anilistProgress,
+  ]);
 
   // Kitsu fill-in for the panel. Viewability comes from the EpisodePanel's
   // FlatList (no pager here — the panel is a scrollable list), debounced so a
@@ -489,6 +565,7 @@ export default function LandscapePlayer() {
   const subsPositionFrac = useSetting('subs.positionFrac');
   const subsBackground = useSetting('subs.background');
   const subsColor = useSetting('subs.color');
+  const subsDelayMs = useSetting('subs.delayMs');
 
   /**
    * One resolved object for the overlay, so the offset arithmetic exists once.
@@ -943,6 +1020,17 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const qualitySelRef = useRef(qualitySel);
   qualitySelRef.current = qualitySel;
   /**
+   * The viewer's subtitle sync correction, for the two SAMPLERS that read it.
+   *
+   * Both the `timeUpdate` listener and the subtitle tick below live in an effect
+   * keyed on the media item, not on the settings — re-creating that effect (and
+   * re-adding every listener) every time the sync slider moves would be absurd,
+   * and the listener would still close over a stale value. A render-synced ref
+   * is the same answer the file already uses for `sourcesRef` and `qualitySelRef`.
+   */
+  const subsDelayRef = useRef(subsDelayMs);
+  subsDelayRef.current = subsDelayMs;
+  /**
    * Whether the VIEWER has steered quality this attempt.
    *
    * The distinction the default-quality applier turns on: `qualitySel ===
@@ -954,6 +1042,16 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    */
   const qualityChosenRef = useRef(false);
   const playedRef = useRef(false);
+  /**
+   * Set when the stream reaches its end and NOTHING follows — the parked
+   * finale, where an airing show has no next episode and a finished one has run
+   * out. `expo-video` leaves the engine in an ended state there where `play()`
+   * does not restart by itself, so the transport's ▶ would look dead on the one
+   * tap meant to restart the episode. `onPlayPause` reads this to rewind to the
+   * top first; every seek clears it, because once the playhead is off the end a
+   * manual scrub has already left the parked state behind.
+   */
+  const endedRef = useRef(false);
   /**
    * One-shot guard for the resume seek. See the `readyToPlay` listener for why
    * re-applying it on every readiness is an infinite seek loop.
@@ -982,11 +1080,28 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const syncProgressRef = useRef<(ep: number) => Promise<unknown>>(async () => {});
   const progressSynced = useRef(false);
   const syncCooldownUntil = useRef(0);
+  /**
+   * Whether there is an account to sync TO. Read through a ref for the same
+   * reason every other value in the 82% rule is: the `timeUpdate` listener's
+   * deps must not grow.
+   */
+  const signedInRef = useRef(false);
   const lastSaved = useRef(0);
   const totalEpsRef = useRef(0);
   totalEpsRef.current = totalEps;
   const positionRef = useRef(0);
   const durationRef = useRef(0);
+  /**
+   * AUTO-ADVANCE. The episode number `playToEnd` may hand the viewer to, or
+   * null to stay parked. Computed in the render body (so a late AniList
+   * payload or a source list landing re-derives it) and read through the ref
+   * by the `playToEnd` listener, whose deps must not grow with every merge —
+   * the same shape as `totalEpsRef` above.
+   */
+  const autoAdvanceRef = useRef<number | null>(null);
+  autoAdvanceRef.current = nextPlayableEpisode(epNum, mediaDetail ?? undefined);
+  /** The scheduled advance, so unmount and a manual pick can cancel it. */
+  const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Presence bookkeeping for the event-driven pushes (see the listeners
   // effect): whether the timeline has been sent (duration only becomes real
   // some ticks into playback — before that the card carries no end timestamp,
@@ -1117,10 +1232,16 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   }, []);
 
   useEffect(() => {
-    const currentCue = cueAt(cues, positionRef.current);
+    const currentCue = cueAtSync(cues, positionRef.current, subsDelayMs);
     setCue((previous) => previous === currentCue ? previous : currentCue);
-  }, [cues]);
+  }, [cues, subsDelayMs]);
 
+  const queryClient = useQueryClient();
+  // `signedIn` above reads `useUserId()`, a synchronous external store, so it is
+  // already correct by the time the player's listeners run. `!= null` counts
+  // only a real id as signed in — `undefined` (keychain not read yet) must not
+  // fire a request that would just 401.
+  signedInRef.current = signedIn;
   const { mutateAsync: syncProgress } = useSyncListProgress(animeId);
   syncProgressRef.current = syncProgress;
 
@@ -1260,6 +1381,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       for (const t of noteTimersRef.current) clearTimeout(t);
       if (frameWatchdogRef.current) clearTimeout(frameWatchdogRef.current);
+      // A pending auto-advance must not fire into an unmounted screen: backing
+      // out during the 1.5s beat is the viewer saying "stop here".
+      if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
     },
     []
   );
@@ -1292,6 +1416,15 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         readSourcePref(animeId),
       ]);
       if (gen !== loadGenRef.current) return;
+      // THE MEDIA CACHE SEED. The player fetches its own media payload, and
+      // the sync mutation reads `qk.media` for the finale rule (a reached
+      // episode count on a finished show completes the entry). A viewer who
+      // enters the player without visiting the details page first — a deep
+      // link, a stale Continue Watching jump — had an empty cache there, so
+      // "mark as completed on the finale" silently degraded to "promote to
+      // CURRENT". Same producer (`fetchMedia`), same key, fresher data.
+      queryClient.setQueryData(qk.media(animeId), m);
+      setMediaDetail(m);
       // One place every resolve verdict flows through — the fast path and the
       // late-landing path are the same code, because they are the same event.
       // Defined here because its body reads `prefExtId`, which is this
@@ -1434,7 +1567,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         loadBusyRef.current = false;
       }
     }
-  }, [animeId, epNum, linkOk]);
+  }, [animeId, epNum, linkOk, queryClient]);
 
   useEffect(() => {
     // `linkOk` rather than an isFinite check. `Number.isFinite(NaN)` is false so
@@ -1795,7 +1928,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // includes the moment right after a replace. Clamped at 0 rather than
         // passed through, or the buffered bar would render at a negative
         // fraction and vanish.
-        const currentCue = cueAt(cuesRef.current, p.currentTime);
+        const currentCue = cueAtSync(cuesRef.current, p.currentTime, subsDelayRef.current);
         setCue((previous) => previous === currentCue ? previous : currentCue);
         const source = sourcesRef.current[srcIndexRef.current];
         const skip = source?.intro && p.currentTime >= source.intro.start && p.currentTime < source.intro.end
@@ -1870,7 +2003,16 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         }
 
         // 82% rule. One AniList write per episode, fired once.
+        //
+        // NOT SIGNED IN IS NOT A FAILURE — it is the reason there is nothing to
+        // send. Without this guard the mutation was still attempted for a
+        // logged-out viewer: it threw "Sign in to track progress", and the
+        // catch below put it on a 60s cooldown and tried again on the next
+        // tick, for the rest of the playback — a loop that can never succeed.
+        // The episode is deliberately NOT marked synced, so signing in later
+        // still syncs it.
         if (
+          signedInRef.current &&
           !progressSynced.current &&
           dur > 0 &&
           Date.now() >= syncCooldownUntil.current
@@ -1883,7 +2025,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
               .current(epNum)
               .then(() => {
                 void markSynced(animeId, epNum);
-                flash(`EP ${epNum} marked on AniList`);
+                // DELIBERATELY NO TOAST. The 82% sync is the tracker doing its
+                // ordinary job, not an event worth interrupting the picture
+                // for — a player surface stays silent about bookkeeping.
               })
               .catch(() => {
                 // Not synced. Clear the flag so a later tick can retry, but put it
@@ -2053,9 +2197,55 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         return;
       }
       void savePosition(animeId, epNum, player.duration || 0);
+      // AUTO-ADVANCE. The manual next-episode button already worked; this is
+      // the player pressing it for the viewer when the stream reaches its end.
+      // `nextPlayableEpisode` is AniList's aired count, not the season total —
+      // an airing show at its last released episode stays parked instead of
+      // resolving into an unaired episode's error card. The 82% sync is
+      // already in flight here and outlives this screen; the finale's
+      // COMPLETED write does not need this handler at all.
+      const next = autoAdvanceRef.current;
+      if (next != null) {
+        advanceTimerRef.current = setTimeout(() => {
+          advanceTimerRef.current = null;
+          router.replace({ pathname: '/watch/[id]/[ep]', params: { id: String(animeId), ep: String(next) } });
+        }, AUTO_ADVANCE_DELAY_MS);
+      } else {
+        // PARKED FINALE. Nothing follows, so the player stops here and the
+        // viewer holds the last frame. Two things have to flip with it, or the
+        // transport lies about the state it is in:
+        //
+        //   `desiredPlayingRef` drops, because nothing is playing. It is still
+        //   `true` here (the wheel was never turned — this is the stream running
+        //   out, not the viewer pausing), and `onPlayPause` reads it to decide
+        //   pause-vs-play. Left `true`, the first ▶ tap computes "pause" and
+        //   no-ops, and only the SECOND tap plays — a dead-looking button.
+        //
+        //   `endedRef` arms so that ▶ rewinds before playing. In the ended state
+        //   a bare `play()` does nothing, so the tap that should restart the
+        //   episode would otherwise be swallowed.
+        //
+        // NOT set on the auto-advance branch above: there the next episode is
+        // about to autoplay, and dropping the intent flag would land it paused.
+        desiredPlayingRef.current = false;
+        endedRef.current = true;
+      }
     }));
 
+    // The subtitle overlay's OWN tick — see `SUBTITLE_TICK_MS`. The
+    // `timeUpdate` handler above already looks up a cue, but only every 0.5s
+    // (the interval the presence push, the health monitor and the auto-skip all
+    // share), and a cue boundary that lands between two of those samples is
+    // half a second late. This one only re-reads the playhead and re-picks the
+    // cue; the sync correction is applied by `cueAtSync` on both paths through
+    // the ref, so it takes effect on the very next tick after the slider moves.
+    const cueTimer = setInterval(() => {
+      const currentCue = cueAtSync(cuesRef.current, player.currentTime, subsDelayRef.current);
+      setCue((previous) => previous === currentCue ? previous : currentCue);
+    }, SUBTITLE_TICK_MS);
+
     return () => {
+      clearInterval(cueTimer);
       for (const s of subs) s.remove();
     };
   }, [player, animeId, epNum, pushPresence, flash, applyResumePosition, readHealth, loadResumeOnce]);
@@ -2066,6 +2256,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   // the other.
   useEffect(() => {
     playedRef.current = false;
+    // The parked-finale flag belongs to the media item that ended. A source or
+    // quality switch re-runs this effect (and so does the route replace into a
+    // newly picked episode), and the fresh item is not parked — leaving it set
+    // would make the first ▶ on the new episode rewind it to 0.
+    endedRef.current = false;
     autoSkippedOpening.current = false;
     autoSkippedEnding.current = false;
     lastSaved.current = 0;
@@ -2086,6 +2281,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // was never the problem.
     healthRef.current = resetHealth(Date.now());
     setHealth(UNKNOWN_HEALTH);
+    // A pending auto-advance belongs to the media item that ENDED. A source or
+    // quality switch re-runs this effect; a timer scheduled by the old item's
+    // `playToEnd` must not survive it and fire a stale `router.replace`.
+    if (advanceTimerRef.current) {
+      clearTimeout(advanceTimerRef.current);
+      advanceTimerRef.current = null;
+    }
   }, [srcIndex, qualitySel, reloadNonce]);
 
   // -------------------------------------------------------------------------
@@ -2489,6 +2691,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   // -------------------------------------------------------------------------
   const onPickEpisode = useCallback(
     (n: number) => {
+      // A manual pick outranks a scheduled auto-advance: the viewer said where
+      // they want to go, and a timer firing a beat later would replace the
+      // route they just chose with the episode they just left.
+      if (advanceTimerRef.current) {
+        clearTimeout(advanceTimerRef.current);
+        advanceTimerRef.current = null;
+      }
       if (n === epNum) {
         setPanelOpen(false);
         return;
@@ -2599,6 +2808,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    */
   const seekWithGrace = useCallback(
     (apply: () => void, target?: number) => {
+      // Every seek passes through here, which makes it the one place to drop the
+      // parked-finale flag: once the playhead is off the end — a restart from 0,
+      // a scrub back, a resume — the engine is no longer in its ended state, so
+      // a later ▶ must play rather than rewind.
+      endedRef.current = false;
       const now = Date.now();
       healthRef.current = noteSeek(readHealth(now), now);
       // The picture is about to freeze on its way to the target — show the
@@ -3148,7 +3362,16 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           const willPause = desiredPlayingRef.current;
           desiredPlayingRef.current = !desiredPlayingRef.current;
           if (willPause) player.pause();
-          else player.play();
+          else {
+            // PARKED AT THE END. The stream ran out and nothing follows, so the
+            // engine sits in its ended state where a bare `play()` does nothing
+            // — the tap that should replay the episode would be swallowed. Jump
+            // to the top first, through the grace wrapper so the ring shows and
+            // the seek's own bookkeeping is kept; it also clears `endedRef`,
+            // which is exactly right now that we are leaving the end behind.
+            if (endedRef.current) seekWithGrace(() => { player.currentTime = 0; }, 0);
+            player.play();
+          }
           pokeControls();
         }}
         onPrev={onPrev}
@@ -3249,6 +3472,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           positionFrac: subsPositionFrac,
           background: subsBackground,
           color: subsColor,
+          delayMs: subsDelayMs,
         }}
         onSubsSize={(k) => setSetting('subs.size', k)}
         onSubsPosition={(k) => setSetting('subs.position', k)}
@@ -3258,6 +3482,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         }}
         onSubsBackground={(k) => setSetting('subs.background', k)}
         onSubsColor={(k) => setSetting('subs.color', k)}
+        onSubsDelay={(ms) => setSetting('subs.delayMs', ms)}
       />
 
       {customSpeedOpen ? (

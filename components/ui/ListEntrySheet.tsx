@@ -13,6 +13,9 @@
 //
 //   STATUS      the whole point of the button.
 //   PROGRESS    "how far am I", and the field people come back to update most.
+//               A stepper for ±1, but the number is also a field: tap it and
+//               type, or hold +/− to run. See `Stepper` for why the buttons
+//               alone were not enough.
 //   SCORE       what the title was worth, on AniList's own 0-10 scale.
 //   REPEAT      only shown for REPEATING, because that is the only status where
 //               it means anything.
@@ -46,6 +49,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import Animated, {
@@ -364,6 +368,10 @@ export function ListEntrySheet({
             contentContainerStyle={styles.bodyInner}
             showsVerticalScrollIndicator={false}
             bounces={false}
+            // A tap on Save while the number field is open must land as a tap on
+            // Save, not as the tap that closes the keyboard. Without this the
+            // first press is swallowed and the sheet looks unresponsive.
+            keyboardShouldPersistTaps="handled"
             onScroll={(e) => {
               scrollOffset.current = e.nativeEvent.contentOffset.y;
             }}
@@ -420,7 +428,7 @@ export function ListEntrySheet({
               />
               {!known ? (
                 <Text style={[styles.help, { color: color.text.muted }]}>
-                  AniList has no episode count for this title, so this is a free
+                  AniList has no episode count for this title, so type any
                   number.
                 </Text>
               ) : null}
@@ -591,15 +599,36 @@ function Field({
 }
 
 /**
- * Minus / value / plus.
+ * Minus / value / plus — where the value is ALSO a field.
  *
- * A stepper rather than a slider or a text field because the value is a small
- * integer with a known ceiling and people change it by one or two at a time. It
- * also cannot be typed past the total, which is the whole reason AniList is not
- * trusted with the number directly.
+ * WHY THE BUTTONS WERE NOT ENOUGH. A stepper is the right control for "I watched
+ * one more", and the wrong one for the rest: reaching episode 1,100 of a long
+ * runner is 1,100 taps, so the only way to use it on a long series was to not
+ * use it. Three ways in now, one per size of jump:
  *
- * `warn` marks the out-of-range case in the accent rather than blocking it —
- * AniList allows it, so the app allows it, but it should not look deliberate.
+ *   tap +/−     one episode, the common case.
+ *   hold +/−    a run, accelerating out of the ~0.3s long-press delay at ~11/s
+ *               — so it keeps going for as long as the finger is down, and a
+ *               "+12" never needs the keyboard.
+ *   tap the     any value at all, in one gesture. The number is drawn as a
+ *   number      bordered field, not bare text, because a value that can be
+ *               edited has to look like one.
+ *
+ * TYPED KEYS GO STRAIGHT TO `onChange`, per keystroke rather than on submit.
+ * That keeps the sheet's draft always current, so Save can never read a number
+ * the user just typed and has not "committed" — there is no commit step to miss,
+ * and no blur ordering to get wrong. It costs nothing: the draft is local, so
+ * nothing leaves the phone until Save.
+ *
+ * THE CEILING HOLDS ON EVERY PATH — buttons, hold, and keystrokes alike. That is
+ * the reason AniList is not handed the number directly: it accepts any integer,
+ * so a 12-episode title can be marked 40 watched and the site will keep that
+ * forever.
+ *
+ * `warn` is for a value that is over the count ANYWAY — an entry set past the
+ * total on the website. It is drawn in the danger colour rather than clamped
+ * away, so opening the sheet shows the state AniList actually holds instead of
+ * quietly "fixing" it.
  */
 function Stepper({
   value,
@@ -615,12 +644,84 @@ function Stepper({
   onChange: (n: number) => void;
 }) {
   const { color } = useTheme();
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState('');
+
+  /**
+   * The repeat: the interval, and the value it is running from.
+   *
+   * `live` exists because the prop is not safe to read inside the interval. The
+   * timer runs at ~11/s, faster than React is obliged to re-render, so a tick
+   * that read `value` could step from a render the previous tick has already
+   * outrun and write the same number twice. The ref is the running total; the
+   * prop re-syncs it once the finger is up, when it is the authority again.
+   */
+  const hold = useRef<ReturnType<typeof setInterval> | null>(null);
+  const live = useRef(value);
+  if (!hold.current) live.current = value;
+
+  const clamp = (n: number) => Math.min(Math.max(n, min), max);
+
+  /** Only ever called with a reason to: an unmount, a release, or a bound. */
+  const stopHold = useCallback(() => {
+    if (hold.current) clearInterval(hold.current);
+    hold.current = null;
+  }, []);
+
+  // A hold that outlives the sheet would keep writing to a dead draft.
+  useEffect(() => stopHold, [stopHold]);
+
+  const nudge = (dir: -1 | 1) => {
+    const next = clamp(live.current + dir);
+    if (next === live.current) {
+      stopHold(); // Hit min or max — nothing left to run toward.
+      return;
+    }
+    live.current = next;
+    onChange(next);
+  };
+
+  const startHold = (dir: -1 | 1) => {
+    stopHold();
+    live.current = value; // The prop is the authority at press time.
+    nudge(dir);
+    hold.current = setInterval(() => nudge(dir), 90);
+  };
+
+  /**
+   * Sanitised per keystroke: digits only, four of them (nothing AniList has
+   * indexed needs a fifth), clamped to the range, and written BACK to the field
+   * so the cap is visible while typing rather than a surprise on blur.
+   *
+   * An empty field holds the draft where it is — it is a half-typed number, not
+   * a request to write zero — and the blur below puts the number back.
+   */
+  const type = (raw: string) => {
+    const digits = raw.replace(/[^0-9]/g, '').slice(0, 4);
+    if (digits === '') {
+      setText('');
+      return;
+    }
+    const n = clamp(parseInt(digits, 10));
+    setText(String(n));
+    onChange(n);
+  };
+
+  const valueColor = warn ? color.status.danger : color.text.primary;
+
   const btn = (dir: -1 | 1, label: string, enabled: boolean) => (
     <Pressable
-      onPress={() => enabled && onChange(value + dir)}
+      onPress={() => enabled && onChange(clamp(value + dir))}
+      // A long press REPLACES the tap rather than repeating it — React Native
+      // suppresses `onPress` once `onLongPress` has fired, so there is no
+      // double-count at the start of a run.
+      onLongPress={() => enabled && startHold(dir)}
+      onPressOut={stopHold}
+      delayLongPress={300}
       disabled={!enabled}
       accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityHint="Hold to repeat"
       // Bordered rather than a bare glyph so the tappable area is obvious.
       style={({ pressed }) => [
         styles.stepBtn,
@@ -640,14 +741,56 @@ function Stepper({
   return (
     <View style={styles.stepRow}>
       {btn(-1, 'Decrease', value > min)}
-      <Text
-        style={[
-          styles.stepValue,
-          { color: warn ? color.status.danger : color.text.primary },
-        ]}
-      >
-        {value}
-      </Text>
+      {editing ? (
+        <TextInput
+          value={text}
+          onChangeText={type}
+          onBlur={() => setEditing(false)}
+          onSubmitEditing={() => setEditing(false)}
+          autoFocus
+          selectTextOnFocus
+          keyboardType="number-pad"
+          returnKeyType="done"
+          maxLength={4}
+          accessibilityLabel="Episodes watched"
+          style={[
+            styles.stepField,
+            styles.stepInput,
+            {
+              backgroundColor: color.bg.surface,
+              borderColor: color.accent.base,
+              color: valueColor,
+            },
+          ]}
+        />
+      ) : (
+        <Pressable
+          onPress={() => {
+            stopHold();
+            setText(String(value));
+            setEditing(true);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel={`${value}. Tap to type a number`}
+          style={({ pressed }) => [
+            styles.stepField,
+            {
+              backgroundColor: color.bg.surface,
+              borderColor: color.border.muted,
+              opacity: pressed ? 0.7 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.stepValue, { color: valueColor }]}>{value}</Text>
+          {/* The pencil IS the "you can type here" signal — a number that just
+              sits in a box reads as a readout, however it is bordered. Pinned to
+              the right edge rather than laid out beside the digits so the number
+              stays centred in the field for any number of digits. */}
+          <View style={styles.stepPen}>
+            <AppIcon name="edit" size={13} color={color.text.secondary} />
+          </View>
+        </Pressable>
+      )}
       {btn(1, 'Increase', value < max)}
     </View>
   );
@@ -773,8 +916,35 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   stepGlyph: { fontSize: 19, fontFamily: font.medium, lineHeight: 22 },
-  stepValue: {
+  // The number is dressed as a field between the two buttons — a value you can
+  // tap and edit has to look like one, or the type path is undiscoverable.
+  // `flex: 1` so the three controls split the row and the number stays centred.
+  stepField: {
     flex: 1,
+    height: 38,
+    borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepValue: {
+    fontSize: 17,
+    fontFamily: font.semibold,
+    fontVariant: ['tabular-nums'],
+  },
+  // Absolute so the digits do not have to shift to make room for it.
+  stepPen: {
+    position: 'absolute',
+    right: 7,
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+  },
+  // The same box, as an input: `paddingVertical: 0` because Android adds its own
+  // and it would push the number off-centre otherwise.
+  stepInput: {
+    paddingVertical: 0,
+    paddingHorizontal: spacing.sm,
     textAlign: 'center',
     fontSize: 17,
     fontFamily: font.semibold,

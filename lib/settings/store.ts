@@ -275,6 +275,41 @@ export const SUBTITLE_COLORS = [
 export type SubtitleColorKey = (typeof SUBTITLE_COLORS)[number]['key'];
 
 /**
+ * Bounds and granularity of the subtitle sync control, in milliseconds.
+ *
+ * ±2s is well past any real correction: a sidecar track is authored against a
+ * different release, and the drift that produces is a fraction of a second. The
+ * range exists so the slider's middle is ZERO — the value the overwhelming
+ * majority of viewers are on — rather than so much of it is ever used.
+ *
+ * 50ms is below the threshold at which a human notices lip-sync drift, so one
+ * step is the finest correction worth offering, and 0 sits exactly on the grid
+ * (from `MIN`, every 50ms is a step) so the slider can always land back on it.
+ */
+export const SUBTITLE_DELAY_MIN = -2000;
+export const SUBTITLE_DELAY_MAX = 2000;
+export const SUBTITLE_DELAY_STEP = 50;
+
+/**
+ * Tick labels for the sync slider, derived from the bounds above rather than
+ * typed out twice, so the two cannot disagree.
+ *
+ * They exist because `Slider`'s DEFAULT marks are positional — "Bottom … Top" —
+ * which on a timing control is not merely unhelpful, it is wrong. What a viewer
+ * needs from these ticks is where ZERO is: the slider's centre, the value almost
+ * everyone stays on, and the one place a mis-set sync is recovered from. "−2s …
+ * 0 … +2s" says that in five columns of a phone, which the full phrases from
+ * `formatSubtitleDelay` would not.
+ */
+export const SUBTITLE_DELAY_MARKS = [0, 0.25, 0.5, 0.75, 1].map((frac) => {
+  const ms = SUBTITLE_DELAY_MIN + frac * (SUBTITLE_DELAY_MAX - SUBTITLE_DELAY_MIN);
+  return {
+    frac,
+    label: ms === 0 ? '0' : `${ms > 0 ? '+' : '\u2212'}${Math.abs(ms) / 1000}s`,
+  };
+});
+
+/**
  * Discord Rich Presence status, in display order. The keys are Discord's own
  * status strings, so they pass straight through to the gateway payload.
  */
@@ -472,6 +507,20 @@ interface SettingsSchema {
   /** Text colour. See SUBTITLE_COLORS. */
   'subs.color': SubtitleColorKey;
   /**
+   * Sync correction applied to the subtitle lookup, in milliseconds.
+   *
+   * POSITIVE DELAYS the subtitles (they appear later than the track says),
+   * NEGATIVE ADVANCES them (earlier) — the convention desktop players use, and
+   * the one applied in `cueAtSync`. Zero, the default, is "as authored".
+   *
+   * It exists because a sidecar track is authored against a different release
+   * than the one being streamed, and that offset is a property of the FILE, not
+   * of our pipeline: we cannot detect it, only the viewer can see it. Also note
+   * it is NOT a fix for our own sampling cadence — that is the overlay's own
+   * tick, tightened separately, so the default here stays a true zero.
+   */
+  'subs.delayMs': number;
+  /**
    * URLs of extension repositories (GitHub raw or compatible). Empty = none.
    * Manifests are fetched from `<url>/index.json`. No default is shipped, so a
    * fresh install has no sources until the user adds one (Play Store friendly).
@@ -546,6 +595,9 @@ export const DEFAULTS: SettingsSchema = {
   'subs.positionFrac': DEFAULT_POSITION_FRAC,
   'subs.background': 'plate',
   'subs.color': 'white',
+  // Zero is "as authored". A non-zero default would silently re-time every
+  // track on an install that never asked for it.
+  'subs.delayMs': 0,
   'extensions.repoUrls': ['https://github.com/Coolboi018/Miori-Extensions'],
   'extensions.repoAllowlists': {},
   'extensions.autoUpdate': true,
@@ -716,6 +768,18 @@ export function isKnownValue(key: SettingKey, value: unknown): boolean {
   if (key === 'subs.positionFrac') {
     // A fraction in [0, 1]. Anything else is corrupt and falls back to default.
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+  }
+  if (key === 'subs.delayMs') {
+    // Explicit branch for the same reason as `player.speed`: the schema default
+    // is the NUMBER 0, so `allowedValues` returns `[0]` and every real
+    // correction would be judged unknown and reset to zero on every launch —
+    // the viewer would set 0.5s earlier, restart, and find it back in sync.
+    return (
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      value >= SUBTITLE_DELAY_MIN &&
+      value <= SUBTITLE_DELAY_MAX
+    );
   }
   if (key === 'extensions.repoUrls') {
     // Array of free-form URL strings. Empty array is the default (no repos).

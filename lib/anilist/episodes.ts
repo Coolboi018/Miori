@@ -120,6 +120,35 @@ export function nothingAiredYet(media: MediaDetail | undefined): boolean {
 }
 
 /**
+ * The episode auto-advance may land on when the current one ends, or null to
+ * stay put.
+ *
+ * THE 15 Nov DEVICE REPORT: the player sat parked on the ended frame forever —
+ * the manual next-episode button worked, but nothing pressed it for the viewer.
+ * The rule for whether a next episode EXISTS must be the same one that owns
+ * episode counting everywhere else (`releasedCount`), because `Media.episodes`
+ * is a SEASON TOTAL: auto-advancing by `epNum < totalEps` alone would walk a
+ * still-airing show straight into an unaired episode and an error card. AniList
+ * is the authority on "has episode N aired" — the source's own list is NOT,
+ * because several pre-generate the whole season's rows (Bingr does; One Piece's
+ * arrived as 1274 rows for 1174 episodes).
+ *
+ * No evidence (`releasedCount` 0 — no total, no schedule, no status) also stays
+ * put: guessing high lands on a resolve failure, and the failure modes are not
+ * symmetric — skipping a playable episode is recoverable by hand, an error card
+ * in the middle of a binge is not.
+ */
+export function nextPlayableEpisode(
+  current: number,
+  media: MediaDetail | undefined
+): number | null {
+  const next = current + 1;
+  if (current < 1) return null;
+  const released = releasedCount(media);
+  return next <= released ? next : null;
+}
+
+/**
  * Collapse repeated episode numbers to one row each, first occurrence winning.
  *
  * A repeated number is never a second episode — it is the source double-

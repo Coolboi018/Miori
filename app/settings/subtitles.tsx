@@ -26,6 +26,10 @@ import { SettingRow, SettingSection } from '@/components/ui/settings';
 import {
   SUBTITLE_BACKGROUNDS,
   SUBTITLE_COLORS,
+  SUBTITLE_DELAY_MARKS,
+  SUBTITLE_DELAY_MAX,
+  SUBTITLE_DELAY_MIN,
+  SUBTITLE_DELAY_STEP,
   SUBTITLE_POSITIONS,
   SUBTITLE_SIZES,
   type SubtitleBackgroundKey,
@@ -36,7 +40,7 @@ import {
 import { Slider } from '@/components/ui/Slider';
 import { useSetting, useSetSetting } from '@/lib/settings/useSetting';
 import { SUBTITLE_TYPEGRAPHY, resolveSubtitleStyle } from '@/lib/subtitles/style';
-import { cueAt, type Cue } from '@/lib/subtitles/vtt';
+import { cueAt, formatSubtitleDelay, type Cue } from '@/lib/subtitles/vtt';
 import { font, radii, spacing } from '@/lib/ui/tokens';
 import { useTheme } from '@/lib/ui/useTheme';
 
@@ -60,6 +64,7 @@ export default function SubtitleSettings() {
   const background = useSetting('subs.background');
   const subsColor = useSetting('subs.color');
   const subsPositionFrac = useSetting('subs.positionFrac');
+  const subsDelayMs = useSetting('subs.delayMs');
 
   const style = useMemo(
     () => resolveSubtitleStyle({ size, position, positionFrac: subsPositionFrac, background, color: subsColor }),
@@ -208,6 +213,52 @@ export default function SubtitleSettings() {
         })}
       </SettingSection>
 
+      {/* Sync is the one subtitle setting with no preview worth drawing: the
+          effect is a line arriving a fraction of a second earlier or later,
+          which a still image cannot show. What it CAN show is the direction in
+          words, so the label says "0.50s earlier" rather than "−500" — no one
+          has to work out which way the number points. */}
+      <SettingSection title="Sync">
+        <View style={styles.sliderSection}>
+          <View style={styles.syncLabelRow}>
+            {/* `sliderLabel`'s own bottom margin exists for the solo-label case;
+                inside this row it would offset the text 4pt above the Reset chip,
+                so it is cancelled here rather than removed there. */}
+            <Text style={[styles.sliderLabel, styles.syncLabelText, { color: themeColor.text.muted }]}>
+              {formatSubtitleDelay(subsDelayMs)}
+            </Text>
+            {subsDelayMs !== 0 ? (
+              <Pressable
+                onPress={() => setSetting('subs.delayMs', 0)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Reset subtitle sync"
+                style={({ pressed }) => [
+                  styles.resetBtn,
+                  { backgroundColor: themeColor.bg.elevated },
+                  pressed ? styles.resetPressed : null,
+                ]}
+              >
+                <Text style={[styles.resetLabel, { color: themeColor.accent.base }]}>Reset</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <Slider
+            value={subsDelayMs}
+            onValueChange={(v) => setSetting('subs.delayMs', v)}
+            minimumValue={SUBTITLE_DELAY_MIN}
+            maximumValue={SUBTITLE_DELAY_MAX}
+            step={SUBTITLE_DELAY_STEP}
+            marks={SUBTITLE_DELAY_MARKS}
+          />
+          <Text style={[styles.syncHint, { color: themeColor.text.muted }]}>
+            Slide left to bring subtitles earlier, right to push them later. Most tracks need
+            nothing here — it is for a subtitle file authored against a different release.
+            Adjustable while watching, from the player’s subtitle settings.
+          </Text>
+        </View>
+      </SettingSection>
+
       {/* A standing answer to the question these rows create: why is there no
           "text colour" or "outline thickness"? Because both would be a second
           answer to the same question — legibility over arbitrary video — and
@@ -331,5 +382,34 @@ const styles = StyleSheet.create({
   },
   sliderMark: {
     fontSize: 10,
+  },
+  /** Direction in words on the left, Reset on the right when there is one. */
+  syncLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  /** A quiet chip rather than the accent: it undoes a correction, it is not a CTA. */
+  resetBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radii.sm,
+  },
+  resetPressed: {
+    opacity: 0.6,
+  },
+  resetLabel: {
+    fontSize: 12,
+    fontFamily: font.semibold,
+  },
+  syncLabelText: {
+    marginBottom: 0,
+    textAlign: 'left',
+  },
+  syncHint: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: spacing.xs,
   },
 });

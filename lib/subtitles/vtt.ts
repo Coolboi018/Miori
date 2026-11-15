@@ -88,3 +88,40 @@ export function cueAt(cues: Cue[], t: number): Cue | null {
   }
   return null;
 }
+
+/**
+ * The cue to show at playhead time `t`, corrected by the viewer's sync setting.
+ *
+ * `delayMs` uses the convention every desktop player uses, so it is the one
+ * people already expect: POSITIVE delays the subtitles (they appear later than
+ * the track asks for), NEGATIVE advances them (earlier).
+ *
+ * The correction is applied to the LOOKUP TIME, never to the cues. The parsed
+ * track stays byte-identical to the file, so changing the value costs one
+ * subtraction, there is nothing to re-parse, and a bug here can only ever
+ * misplace a line — never corrupt the track it came from.
+ *
+ * A zero (or non-finite) delay short-circuits to `cueAt`, so the default path
+ * is exactly what it was before this setting existed. That matters: it is the
+ * path every viewer who never opens the sync control is on.
+ */
+export function cueAtSync(cues: Cue[], t: number, delayMs: number): Cue | null {
+  if (!delayMs || !Number.isFinite(delayMs)) return cueAt(cues, t);
+  return cueAt(cues, t - delayMs / 1000);
+}
+
+/**
+ * The sync value as a viewer-facing phrase — `0.50s earlier`, `0.25s later`, or
+ * `In sync` at zero.
+ *
+ * The DIRECTION is carried by the words, not by the number. A control labelled
+ * only `-500` makes the viewer work out which way that points, and half of them
+ * will guess wrong and slide the wrong way. One formatter for the two places
+ * the value is shown (the settings page and the player's subtitle panel) keeps
+ * them from drifting into two different phrasings over time.
+ */
+export function formatSubtitleDelay(ms: number): string {
+  const v = Number.isFinite(ms) ? ms : 0;
+  if (Math.round(v) === 0) return 'In sync';
+  return `${(Math.abs(v) / 1000).toFixed(2)}s ${v < 0 ? 'earlier' : 'later'}`;
+}

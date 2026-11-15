@@ -1,7 +1,7 @@
 import { useFonts } from 'expo-font';
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useNavigationContainerRef } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 // react-native's StatusBar lost `translucent`/`backgroundColor` in RN 0.88
 // (Android is edge-to-edge now); expo-status-bar is the supported wrapper.
@@ -13,13 +13,16 @@ import 'react-native-reanimated';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 
 import { useColorScheme } from '@/components/useColorScheme';
-import { AnimatedSplash } from '@/components/AnimatedSplash';
+// In-app animated splash removed: the native Android/iOS splash screen (configured
+// via the expo-splash-screen plugin in app.json) is the only splash now, so launch
+// looks like Gmail/ChatGPT — one smooth native transition, no competing in-app
+// animation, no double hand-off, no lag on low-end devices.
 import { GatewayView } from '@/components/presence/GatewayView';
 import { ListSheetHost } from '@/components/ui/ListSheetHost';
 import { CharacterSheetHost } from '@/components/ui/CharacterSheetHost';
 import { UpdatePrompt } from '@/components/updates/UpdatePrompt';
 import { AUTO_CHECK_DELAY_MS, checkForUpdate } from '@/lib/updates/store';
-import { SPLASH, handoffMs } from '@/lib/ui/splash';
+import { SPLASH } from '@/lib/ui/splash';
 import { bindNavigationRef } from '@/lib/nav/pushOnce';
 import { RouteProgress } from '@/components/nav/RouteProgress';
 import { hydrateSettings } from '@/lib/settings/useSetting';
@@ -247,66 +250,21 @@ export default function RootLayout() {
    * cache is background work now — see the note there.
    */
   const [fontsReady, setFontsReady] = useState(false);
-  const [animatedSplashVisible, setAnimatedSplashVisible] = useState(true);
-  /**
-   * THE APP TREE IS NOT MOUNTED UNTIL THE SPLASH ENTRANCE HAS FINISHED.
-   *
-   * This is the low-end half of the 15 Nov fix. Mounting home (~70 poster tiles)
-   * plus the cache restore is the single biggest lump of JS work at launch, and
-   * it used to land in the SAME window as the splash entrance — so the one asset
-   * that has to look smooth was competing with the screen it was covering.
-   *
-   * `AnimatedSplash` now fires `onEntered` when its entrance ends, and the hold
-   * that follows is a still frame: that is where the app's first render is paid
-   * for, with the exit fade still to come behind it.
-   */
-  const [appEntered, setAppEntered] = useState(false);
-  const handleSplashEntered = useCallback(() => setAppEntered(true), []);
-  const handleSplashFinish = useCallback(() => setAnimatedSplashVisible(false), []);
   useEffect(() => {
     if (loaded && !error) setFontsReady(true);
   }, [loaded, error]);
 
   /**
-   * LET THE FIRST FRAME OUT, THEN TIME THE HAND-OFF TO THE IN-APP ENTRANCE.
-   *
-   * `hideAsync` only flips `keepSplashScreenOnScreen` to false — it resolves
-   * when the native exit fade STARTS, not when it ends (`SplashScreenManager.kt`
-   * runs `nativeExitMs` of alpha ramp afterwards, still drawn over the React
-   * tree). Starting the animated logo's timeline immediately would therefore
-   * play part of its entrance behind a still picture, which is exactly how a
-   * real animation gets reported as "still". So the TIMELINE waits out
-   * `handoffMs` — the native fade's own duration plus a beat.
-   *
-   * ⚠️ THE TIMELINE, NOT THE MOUNT. This used to hold the whole overlay back,
-   * which left the React tree uncovered for that window and made the app's first
-   * frame the HOME SCREEN — the "home, then the splash animation, then home"
-   * sequence. `nativeSplashGone` is now passed to `AnimatedSplash` as
-   * `handoffDone`; the overlay itself is up from the first frame.
-   *
-   * Timed rather than awaited: `hideAsync`'s promise says nothing about when the
-   * fade finishes, and on web there is no native splash to wait for at all.
+   * NATIVE-ONLY SPLASH (Gmail/ChatGPT style): hide the native splash once the
+   * app is ready; its own native fade carries the transition. No in-app overlay.
    */
-  const [nativeSplashGone, setNativeSplashGone] = useState(Platform.OS === 'web');
   useEffect(() => {
-    if (!fontsReady || !settingsReady || nativeSplashGone) return;
+    if (!fontsReady || !settingsReady) return;
+    if (Platform.OS === 'web') return;
     void SplashScreen.hideAsync();
-    const handoff = setTimeout(() => setNativeSplashGone(true), handoffMs());
-    return () => clearTimeout(handoff);
-  }, [fontsReady, settingsReady, nativeSplashGone]);
+  }, [fontsReady, settingsReady]);
 
-  /**
-   * THE APP IS MOUNTED BEHIND THE OVERLAY, NOT IN FRONT OF IT.
-   *
-   * `!animatedSplashVisible` is the second half of this and it is not a
-   * formality: the watchdog (below) tears the overlay down without ever having
-   * fired `onEntered`, so a stalled entrance would otherwise leave the user on
-   * the overlay's black forever — the "stuck" bug in a new costume.
-   *
-   * The two halves are one expression on purpose: "the app may render" is
-   * exactly "the entrance finished OR there is nothing covering it any more".
-   */
-  const showApp = appEntered || !animatedSplashVisible;
+  const showApp = fontsReady && settingsReady;
 
   /**
    * THE UPDATE CHECK — once per launch, and late.
@@ -322,25 +280,7 @@ export default function RootLayout() {
    * The check itself honours `updates.skippedVersion`, so a release the user
    * skipped stays quiet until a newer one exists — see `lib/updates/release.ts`.
    */
-  /**
-   * THE OVERLAY CANNOT OUTLIVE ITSELF.
-   *
-   * `AnimatedSplash` normally ends by calling back from its fade-out. That
-   * callback rides a setTimeout and a Reanimated completion — both of which a
-   * stalled UI thread on a low-end phone can delay past the point where the app
-   * underneath is ready and interactive. The symptom is the one the user
-   * reported as "it gets stuck": a black rectangle over a working app, with the
-   * only exit being a restart.
-   *
-   * This is the backstop, and it is deliberately LATER than the animation
-   * (`SPLASH.watchdogMs` vs `splashTotalMs()`), so it never cuts a healthy fade
-   * — `scripts/check-splash.ts` pins that relationship.
-   */
-  useEffect(() => {
-    if (!animatedSplashVisible) return;
-    const bail = setTimeout(() => setAnimatedSplashVisible(false), SPLASH.watchdogMs);
-    return () => clearTimeout(bail);
-  }, [animatedSplashVisible]);
+
 
   useEffect(() => {
     if (!fontsReady || Platform.OS === 'web') return;
@@ -367,13 +307,6 @@ export default function RootLayout() {
       }}
     >
       {showApp ? <RootLayoutNav /> : null}
-      {animatedSplashVisible ? (
-        <AnimatedSplash
-          handoffDone={nativeSplashGone}
-          onEntered={handleSplashEntered}
-          onFinish={handleSplashFinish}
-        />
-      ) : null}
     </PersistQueryClientProvider>
   );
 }

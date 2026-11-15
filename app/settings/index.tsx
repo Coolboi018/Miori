@@ -5,7 +5,7 @@
 // instant to open. Row data is a flat array; adding a category is one entry.
 
 import { Image } from 'expo-image';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { pushOnce } from '@/lib/nav/pushOnce';
 import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -91,7 +91,6 @@ const SECTIONS: Section[] = [
 export default function SettingsIndex() {
   const { color } = useTheme();
   const insets = useSafeAreaInsets();
-  const router = useRouter();
   const [duser, setDuser] = useState<DiscordUser | null>(null);
   // Subscribed once for the whole list: the row's hint and its right-hand word
   // both come from this, and neither should be a second subscription.
@@ -144,7 +143,9 @@ export default function SettingsIndex() {
   return (
     <View style={[styles.container, { backgroundColor: color.bg.primary }]}>
       <View style={[styles.header, { paddingTop: insets.top + spacing.lg }]}>
-        <BackPlate label="Back to home" onPress={() => router.back()} />
+        {/* The default press is the guarded `goBack` — landing on the tabs when
+            this page was reached without history (see `lib/nav/back.ts`). */}
+        <BackPlate label="Back to home" />
         <Text style={[styles.title, { color: color.text.primary }]}>Settings</Text>
       </View>
 

@@ -17,7 +17,7 @@
 // control, so the back affordance cannot drift between them.
 
 import { StyleSheet, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { goBack } from '@/lib/nav/back';
 import { RoundedPressable } from '@/components/ui/RoundedPressable';
 import { AppIcon } from '@/components/ui/AppIcon';
 import { useTheme } from '@/lib/ui/useTheme';
@@ -34,12 +34,14 @@ export function BackPlate({
   onPress?: () => void;
 }) {
   const { color } = useTheme();
-  const router = useRouter();
 
   return (
     <View style={styles.wrap}>
       <RoundedPressable
-        onPress={onPress ?? (() => router.back())}
+        // `goBack`, not `router.back()`: a settings page opened from a link has
+        // no history to pop, and an unguarded pop is a red box in dev and a dead
+        // tap in release. See `lib/nav/back.ts`.
+        onPress={onPress ?? (() => goBack())}
         accessibilityRole="button"
         accessibilityLabel={label}
         radius={PLATE / 2}

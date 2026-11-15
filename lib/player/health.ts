@@ -164,6 +164,34 @@ export const MOVE_EPS = 0.05;
 export const STALL_MS = 15_000;
 
 /**
+ * A sample this much later than the previous one means the APP was late, not the
+ * stream.
+ *
+ * THE 16 NOV REPORT, and the reason this constant exists. A notification arrived
+ * on a low-end phone; the system UI animated over the video and the app was not
+ * scheduled for seconds at a time. The tick still fired — LATE — and the stall
+ * watchdog counted the whole gap as a frozen playhead it had been watching.
+ * Fifteen seconds of that is a 'stalled' verdict, so it failed over: a fresh
+ * resolve, a `replaceAsync`, a re-render, on the device that was already
+ * struggling. The next window did the same, and the one after it. From the
+ * viewer's side the app went to 1 fps, changed source on its own and restarted
+ * the episode — and none of it was the network.
+ *
+ * The evidence a stall is made of is only valid if we were actually watching. A
+ * gap of this size says we were not: no sample was taken, so nothing was
+ * observed about the playhead in that window. 2.5 ticks is far above any
+ * scheduling hiccup a healthy device produces and far below the 15s the watchdog
+ * needs, so a dead stream on a working phone still fails over exactly on time.
+ *
+ * Compare the reference player in `ShonenX/` (media_kit + ExoPlayer): it has NO
+ * stall watchdog at all, only its own events. That is why a system notification
+ * cannot cascade there — and the reason this rule matters more than a wider
+ * threshold would. The response here is deliberately `noteInterruption`'s:
+ * restart the clocks, keep the decisions, act on nothing.
+ */
+export const STARVED_SAMPLE_MS = 2_500;
+
+/**
  * When a frozen playhead earns a spinner.
  *
  * Short enough to feel responsive, long enough that a single dropped frame does
@@ -389,7 +417,28 @@ export function observeHealth(
     };
   }
 
-  // ── Rule 1: frozen past every deadline. Fail over. ─────────────────────
+  // ── Rule 1: the SAMPLE is late, so its evidence is void. ────────────────
+  //
+  // 16 Nov. See `STARVED_SAMPLE_MS`: a starved app is not a dead stream, and
+  // treating one as the other is how the player adds a source walk to a device
+  // that is already too slow. `dropped` survives (it is spread from `base`),
+  // for the same reason `noteInterruption` keeps it: a starved stretch is not
+  // evidence about the connection at all.
+  if (s.at - prev.lastAt > STARVED_SAMPLE_MS) {
+    return {
+      state: {
+        ...base,
+        lastMovedAt: s.at,
+        deadlineAt: s.at + STALL_MS,
+        starvingSince: null,
+        deepSince: null,
+      },
+      health: { kind: 'unknown' },
+      dropTier: false,
+    };
+  }
+
+  // ── Rule 2: frozen past every deadline. Fail over. ─────────────────────
   //
   // Note this does NOT require a thin buffer. A playhead frozen for the whole
   // window while the pipeline still claims to be playing is a broken source
@@ -417,7 +466,7 @@ export function observeHealth(
 
   const ahead = bufferAhead(s.buffered, s.position);
 
-  // ── Rule 2: the buffer is unknowable. Trap 1. ───────────────────────────
+  // ── Rule 3: the buffer is unknowable. Trap 1. ───────────────────────────
   //
   // An absence of evidence about the buffer is not evidence of a bad buffer.
   // This returns BEFORE the starve bookkeeping is updated, so an unknowable
@@ -433,7 +482,7 @@ export function observeHealth(
     };
   }
 
-  // ── Rule 3: bookkeeping, then the two remaining verdicts. ───────────────
+  // ── Rule 4: bookkeeping, then the two remaining verdicts. ───────────────
   //
   // Both runs are maintained on every knowable sample. The comfortable run is
   // tracked even while starving, because it is the thing that ends a

@@ -202,6 +202,8 @@ const store = read('lib/settings/store.ts');
 const hud = read('lib/player/sideHud.ts');
 const hudView = read('components/player/fullscreen/Hud.tsx');
 const brightness = read('lib/player/brightness.ts');
+const swipeApply = read('lib/player/swipeApply.ts');
+const volumeSrc = read('lib/player/volume.ts');
 
 check(
   'the surface delegates to the real rules (no second copy)',
@@ -256,13 +258,73 @@ check(
     /return \(\) => \{[\s\S]{0,120}endBrightnessSession\(\)/.test(screen)
 );
 check(
-  'brightness writes are throttled, not one native call per frame',
-  /MIN_WRITE_MS/.test(brightness) && /setTimeout/.test(brightness)
+  'brightness writes are coalesced, not one native call per frame',
+  /createLatestWriter/.test(brightness) &&
+    /setTimeout/.test(swipeApply) &&
+    /pending = value/.test(swipeApply),
+  'on Android this write is a full window relayout, not a property poke'
+);
+check(
+  'and it is written in steps, so a sweep is a dozen relayouts and not sixty',
+  /const STEP/.test(brightness) && /quantise\(/.test(brightness)
+);
+//
+// CLEARING THE OVERRIDE, NOT WRITING A NUMBER BACK (16 Nov).
+//
+// `setBrightnessAsync(original)` reads like a restore and is not one: the window
+// keeps that value, so the ACTIVITY — every screen in the app — stops following
+// the system, adaptive brightness included. The reported symptom was exactly
+// that. Only `restoreSystemBrightnessAsync` (BRIGHTNESS_OVERRIDE_NONE) gives the
+// window back.
+check(
+  'leaving the player hands the window back to the SYSTEM brightness',
+  /restoreSystemBrightnessAsync\(\)/.test(brightness) &&
+    !/setBrightnessAsync\(restore\)/.test(brightness),
+  'a written number leaves the whole activity pinned, not just the player'
+);
+check(
+  'the volume write is coalesced the same way',
+  /createLatestWriter/.test(volumeSrc) &&
+    /VOLUME_WRITE_MS/.test(volumeSrc) &&
+    /setVolume\(value\)/.test(screen),
+  'a per-frame native volume write is a platform call plus an event back into JS'
+);
+//
+// THE TWO HALVES, AND THE DIFFERENT THINGS THEY MOVE (16 Nov).
+//
+// Volume must move the DEVICE stream — the hardware keys already do, so an app
+// that only moves its own gain puts two "volumes" under one gesture. Brightness
+// must stay this app's window, and be given back on exit.
+check(
+  'the volume swipe moves the DEVICE stream, not our own gain',
+  /VolumeManager/.test(volumeSrc) &&
+    /setVolume\(value, \{ showUI: false/.test(volumeSrc) &&
+    /beginVolumeSession\(\)/.test(screen),
+  'the hardware keys move the device volume — two numbers for one word is a HUD that lies'
+);
+check(
+  '…and Expo Go still BOOTS: the native module is loaded lazily',
+  /await import\('react-native-volume-manager'\)/.test(volumeSrc) &&
+    !/^import .*react-native-volume-manager/m.test(volumeSrc),
+  'a static import of a module Expo Go does not contain throws while the bundle evaluates'
+);
+check(
+  '…falling back to the player gain when there is no device API',
+  /setVolumeFallback/.test(volumeSrc) && /setVolumeFallback\(/.test(screen)
+);
+check(
+  "brightness stays THIS APP'S window, never the device setting",
+  /setBrightnessAsync/.test(brightness) && !/setSystemBrightnessAsync/.test(brightness),
+  'a player that dims the whole phone leaves a change nobody can trace back to it'
+);
+check(
+  'the trailing value still lands (coalescing, not a debounce)',
+  /end\(\): void \{/.test(swipeApply) && /flush\(\)/.test(swipeApply),
+  'a debounce would only write once the finger stopped'
 );
 check(
   'the HUD lives in its own store, so a drag never re-renders the screen',
-  /subscribeSideHud/.test(hud) && /useSyncExternalStore/.test(hudView) &&
-    !/useState/.test(hud)
+  /subscribeSideHud/.test(hud) && !/useState/.test(hud)
 );
 check(
   'the store carries the SIDE, so swapping the halves moves the readout too',
@@ -286,10 +348,46 @@ check(
   /hudSideFor\(hud\.side\)/.test(hudView),
   'a local `=== right` flip would drift from the rule the check drives'
 );
+//
+// THE VALUE PATH — 16 Nov. The first version re-rendered React once per visible
+// percent and re-laid-out a PERCENTAGE-HEIGHT fill each time. On a low-end phone
+// that burst starved the decoder, and the stutter outlived the gesture. These
+// three checks pin the shape that prevents it.
+{
+  const sideHudSource = hudView.slice(
+    hudView.indexOf('SideHud = memo('),
+    hudView.indexOf('const styles')
+  );
+  check(
+    'the readout subscribes to the store itself, not through React state',
+    /subscribeSideHud\(/.test(sideHudSource) && !/useSyncExternalStore/.test(sideHudSource),
+    'a value that arrives through React state is a re-render per percent'
+  );
+  check(
+    'a value goes to a shared value, and nothing renders a number from it',
+    /fill\.value = s\.value/.test(sideHudSource) &&
+      !/percent/.test(sideHudSource) &&
+      !/<Text/.test(sideHudSource),
+    'a percent text node is what forces ~100 renders across one sweep'
+  );
+  check(
+    'a value change returns before React is told anything at all',
+    /if \(s\.kind === kind && s\.side === side\) return;/.test(sideHudSource),
+    'even a bailing setState is work on the JS thread under a moving finger'
+  );
+  check(
+    'only a change of kind or side re-renders it, and only kind re-fades',
+    /const kindChanged = s\.kind !== kind;/.test(sideHudSource) &&
+      /setHud\(\{ kind, side \}\)/.test(sideHudSource)
+  );
+}
 check(
-  'and it is a VERTICAL fill, drawn from the bottom',
-  /height: `\$\{percent\}%`/.test(hudView) && /justifyContent: 'flex-end'/.test(hudView),
-  'a horizontal fill would read as a download bar on a vertical gesture'
+  'and it is a VERTICAL fill, drawn from the bottom, in POINTS',
+  /useAnimatedStyle/.test(hudView) &&
+    /justifyContent: 'flex-end'/.test(hudView) &&
+    /height: fill\.value/.test(hudView) &&
+    !/height: `\$\{percent\}%`/.test(hudView),
+  'an animated percentage height re-runs layout for every step'
 );
 check(
   'the settings default is the conventional one',

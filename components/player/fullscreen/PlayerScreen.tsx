@@ -77,10 +77,20 @@ import {
   setBrightness,
 } from '@/lib/player/brightness';
 import { scheduleSideHudHide, showSideHud } from '@/lib/player/sideHud';
+import {
+  beginVolumeSession,
+  cancelVolumeWrites,
+  commitVolume,
+  readVolume,
+  setVolume,
+  setVolumeFallback,
+  usingDeviceVolume,
+} from '@/lib/player/volume';
 import { SettingsPanel } from './SettingsPanel';
 import { type MenuRow } from './Menu';
 import { AppIcon } from '@/components/ui/AppIcon';
-import { SubtitleOverlay } from '@/components/player/SubtitleOverlay';
+import { SubtitleStage } from './SubtitleStage';
+import { publishCue } from '@/lib/player/cueStore';
 import { applyTuning, tuningFor } from '@/lib/player/tuning';
 import { describeFailure, type FailureReport } from '@/lib/player/failure';
 import { commitTolerance, toleranceFor } from '@/lib/player/scrub';
@@ -488,7 +498,13 @@ export default function LandscapePlayer() {
   const [failure, setFailure] = useState<FailureReport | null>(null);
 
   // --- Playback -----------------------------------------------------------
-  const [cue, setCue] = useState<Cue | null>(null);
+  /**
+   * THE LIVE CUE IS NOT STATE HERE (16 Nov). It lives in
+   * `lib/player/cueStore.ts` and only `SubtitleStage` subscribes, because a cue
+   * changes a few times a second during dialogue and every one of those changes
+   * used to re-render this whole screen — both bars, two gradients, four chips
+   * and the timeline — for one line of text.
+   */
   const [activeSkip, setActiveSkip] = useState<{ kind: 'opening' | 'ending'; start: number; end: number } | null>(null);
   const [playing, setPlaying] = useState(false);
   /**
@@ -817,6 +833,14 @@ export default function LandscapePlayer() {
    * minute for a value nothing renders. See `observeHealth`.
    */
   const healthRef = useRef<HealthState | null>(null);
+  /**
+   * IS THE APP ON SCREEN? The gate for the two timers that only exist to serve a
+   * picture — the health tick and the subtitle cue tick (see the `AppState`
+   * effect below). A sample taken while the app is away measures the app's own
+   * absence, not the stream, and on Android a backgrounded app's timers fire in
+   * bursts that look exactly like stalls.
+   */
+  const appActiveRef = useRef(AppState.currentState === 'active');
   /**
    * The monitor's state, seeded on first use.
    *
@@ -1255,7 +1279,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
 
   useEffect(() => {
     const currentCue = cueAtSync(cues, positionRef.current, subsDelayMs);
-    setCue((previous) => previous === currentCue ? previous : currentCue);
+    publishCue(currentCue);
   }, [cues, subsDelayMs]);
 
   const queryClient = useQueryClient();
@@ -1786,7 +1810,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     setCues([]);
     positionRef.current = 0;
     durationRef.current = 0;
-    setCue(null);
+    publishCue(null);
     setActiveSkip(null);
     playbackProgressRef.current = false;
     setPlaybackProgress(false);
@@ -1951,7 +1975,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // passed through, or the buffered bar would render at a negative
         // fraction and vanish.
         const currentCue = cueAtSync(cuesRef.current, p.currentTime, subsDelayRef.current);
-        setCue((previous) => previous === currentCue ? previous : currentCue);
+        publishCue(currentCue);
         const source = sourcesRef.current[srcIndexRef.current];
         const skip = source?.intro && p.currentTime >= source.intro.start && p.currentTime < source.intro.end
           ? { kind: 'opening' as const, ...source.intro }
@@ -2262,8 +2286,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // cue; the sync correction is applied by `cueAtSync` on both paths through
     // the ref, so it takes effect on the very next tick after the slider moves.
     const cueTimer = setInterval(() => {
+      // 120ms is the right cadence for a picture with cues on it, and pure cost
+      // for a screen nobody is looking at.
+      if (!appActiveRef.current) return;
       const currentCue = cueAtSync(cuesRef.current, player.currentTime, subsDelayRef.current);
-      setCue((previous) => previous === currentCue ? previous : currentCue);
+      publishCue(currentCue);
     }, SUBTITLE_TICK_MS);
 
     return () => {
@@ -2502,6 +2529,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
        * is the only thing left standing.
        */
       if (!firstFrameRef.current) return;
+      // Off-screen: nothing is watching, and a sample taken from a throttled
+      // timer answers a question about the app, not about the stream.
+      if (!appActiveRef.current) return;
 
       const at = Date.now();
       const verdict = observeHealth(
@@ -2616,9 +2646,18 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * time. Restarting on the way BACK matters for the opposite reason — without
    * it the frozen stretch accumulated while away is still waiting when the app
    * returns, and the first tick after resuming declares a stall.
+   *
+   * IT IS ALSO THE GATE for the two picture-facing timers (`appActiveRef`).
+   * Backgrounded, there is no picture to place cues on and no viewer to decide a
+   * failover for — and on Android a backgrounded app's timers are throttled and
+   * then delivered in a burst, which is a shape the health monitor would happily
+   * read as a frozen playhead. Returning to the foreground restarts the clocks
+   * above, so the first sample back is judged on its own merits rather than on
+   * the time we were away.
    */
   useEffect(() => {
-    const sub = AppState.addEventListener('change', () => {
+    const sub = AppState.addEventListener('change', (next) => {
+      appActiveRef.current = next === 'active';
       const now = Date.now();
       healthRef.current = noteInterruption(readHealth(now), now);
     });
@@ -2817,10 +2856,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // (never below 20%), and says so through the same HUD the swipe uses.
       // `volumeRef` / `lastAudibleRef` are declared below; a closure may read
       // them, and by the time a tap can arrive they exist.
-      if (wasMuted && volumeRef.current === 0) {
+      if (wasMuted && readVolume() === 0) {
         const restored = Math.max(0.2, lastAudibleRef.current);
-        volumeRef.current = restored;
-        player.volume = restored;
+        // The same write the swipe makes, so the readout, the phone and the
+        // stream cannot disagree about the level the mute cycle restored.
+        setVolume(restored);
+        commitVolume();
+        if (usingDeviceVolume()) player.volume = 1;
         showSideHud('volume', restored, sideForKind(swipeSides, 'volume'));
         scheduleSideHudHide();
       }
@@ -2842,8 +2884,15 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * second for a number only the HUD shows. So the engine gets the value
    * directly, and `lib/player/sideHud.ts` hands it to the one component that
    * displays it. Nothing else on this screen moves while a finger drags.
+   *
+   * THE TWO HALVES ACT ON DIFFERENT THINGS, deliberately (16 Nov). The volume
+   * half moves the DEVICE's music stream (`lib/player/volume.ts`) — the same
+   * thing the hardware volume keys move, so the readout and the phone cannot
+   * disagree about the level. The brightness half moves only THIS APP'S window
+   * (`lib/player/brightness.ts`) and is handed back on exit: a screen dimmed
+   * from inside a video player is a change nobody can trace back to the app that
+   * made it.
    */
-  const volumeRef = useRef(1);
   /**
    * The last level that was actually audible — what unmuting at 0% restores.
    * Kept here rather than in the mute handler so a mute/unmute cycle never needs
@@ -2867,15 +2916,27 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * child) because it is an effect cleanup rather than a button handler.
    */
   useEffect(() => {
-    player.volume = volumeRef.current;
+    // The fallback write. Expo Go and web have no device-volume API, so the
+    // gesture moves the player's own gain there; see `lib/player/volume.ts`.
+    setVolumeFallback((value) => {
+      player.volume = value;
+    });
+    void beginVolumeSession().then(() => {
+      // With the DEVICE stream in play our own gain stays at unity — the phone
+      // decides how loud the episode is, and mute remains the player's own flag.
+      player.volume = usingDeviceVolume() ? 1 : readVolume();
+      lastAudibleRef.current = Math.max(0.2, readVolume());
+    });
     void beginBrightnessSession();
     return () => {
       void endBrightnessSession();
+      // Nothing queued may land on a player that is being torn down.
+      cancelVolumeWrites();
     };
   }, [player]);
 
   const onVerticalStart = useCallback((kind: SwipeKind, side: SwipeSide) => {
-    const base = kind === 'volume' ? volumeRef.current : readBrightness();
+    const base = kind === 'volume' ? readVolume() : readBrightness();
     swipeBaseRef.current = { kind, side, base };
     showSideHud(kind, base, side);
   }, []);
@@ -2886,7 +2947,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       if (!swipe) return;
       const value = clampUnit(swipe.base + fraction);
       if (swipe.kind === 'volume') {
-        volumeRef.current = value;
+        // Device volume when the native module is in the build, the player's own
+        // gain when it is not. Coalesced inside the module.
+        setVolume(value);
         if (value > 0) lastAudibleRef.current = value;
         // Raising the volume out of a mute has to unmute: the engine stays muted
         // at any volume, so without this the gesture reads as doing nothing.
@@ -2894,7 +2957,6 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           player.muted = false;
           setMuted(false);
         }
-        player.volume = value;
       } else {
         // Throttled and trailing inside the module — a per-frame native write is
         // a window-attribute change on Android.
@@ -2906,7 +2968,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   );
 
   const onVerticalEnd = useCallback(() => {
+    const ended = swipeBaseRef.current;
     swipeBaseRef.current = null;
+    // The finger has stopped: land the last volume now rather than on the trailing
+    // timer, so the level they stopped on is the level they hear.
+    if (ended?.kind === 'volume') commitVolume();
     scheduleSideHudHide();
   }, []);
 
@@ -3310,6 +3376,99 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const boostRate = isBoosting(speed) ? speed.boost : null;
 
   /**
+   * STABLE PROP IDENTITIES FOR THE MEMOIZED CHROME.
+   *
+   * `TopBar`, `BottomBar`, `CenterTransport`, `GestureSurface`, `SettingsPanel`
+   * and `EpisodePanel` are all `memo` — and every one of them was receiving at
+   * least one freshly created object or arrow per render, so the memo could never
+   * bail out and any unrelated state flip (a subtitle, a spinner, a health kind)
+   * rebuilt all of them. These are the two objects and the handful of handlers
+   * that made that true; the values themselves are unchanged.
+   *
+   * `useMemo`/`useCallback` here rather than inside the children because a child
+   * cannot stabilise a prop its parent re-creates.
+   */
+  const skipWindow = useMemo(
+    () => ({
+      intro: sources[srcIndex]?.intro ?? null,
+      outro: sources[srcIndex]?.outro ?? null,
+    }),
+    [sources, srcIndex]
+  );
+  const onOpenEpisodes = useCallback(() => {
+    setMenu(null);
+    setPanelOpen(true);
+  }, []);
+  const onToggleSettingsMenu = useCallback(() => {
+    setMenu(menu === 'root' || menu === 'subsSettings' ? null : 'root');
+  }, [menu]);
+  const onTrackWidth = useCallback((w: number) => {
+    trackWidthRef.current = w;
+  }, []);
+  const onCloseMenu = useCallback(() => setMenu(null), []);
+  const onNavigateMenu = useCallback((to: string) => setMenu(to as MenuId), []);
+  const onClosePanel = useCallback(() => setPanelOpen(false), []);
+  const subsStyleProp = useMemo(
+    () => ({
+      size: subsSize,
+      position: subsPosition,
+      positionFrac: subsPositionFrac,
+      background: subsBackground,
+      color: subsColor,
+      delayMs: subsDelayMs,
+    }),
+    [subsSize, subsPosition, subsPositionFrac, subsBackground, subsColor, subsDelayMs]
+  );
+  /**
+   * The gesture surface's handler bag.
+   *
+   * The surface is `memo` and its whole contract is this one object, so a fresh
+   * literal per render re-rendered it (and the HUDs inside it) on every state
+   * flip. Same callbacks as before, one identity.
+   */
+  const gestureHandlers = useMemo(
+    () => ({
+      // A SIDE single tap arrives only after the double-tap window closes, so
+      // the first toggle after the chrome has hidden has up to ~300ms of air
+      // under it — the arbitration cost, paid for seeks that never flash the
+      // overlay. A tap in the middle (dead band) still toggles instantly.
+      onTap: () => {
+        if (locked) {
+          // A locked frame's tap only ever reveals the unlock button; it must
+          // not toggle the chrome or unlocking would be a two-tap operation
+          // with an invisible first step.
+          onToggleLock();
+          return;
+        }
+        toggleControls();
+      },
+      // A pair produces ONLY its seek — no chrome flip, no cleanup to race.
+      onDoubleTap: () => {
+        if (locked) return;
+      },
+      onSeek: onGestureSeek,
+      onHoldStart,
+      onHoldMove,
+      onHoldEnd,
+      onVerticalStart,
+      onVerticalMove,
+      onVerticalEnd,
+    }),
+    [
+      locked,
+      onToggleLock,
+      toggleControls,
+      onGestureSeek,
+      onHoldStart,
+      onHoldMove,
+      onHoldEnd,
+      onVerticalStart,
+      onVerticalMove,
+      onVerticalEnd,
+    ]
+  );
+
+  /**
    * The band of screen the video is actually visible in: below the top chrome,
    * above the bottom chrome. Anything that has to be centred on the picture —
    * the speed pill — is centred here rather than on the window, so it does not
@@ -3389,8 +3548,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         onFirstFrameRender={onFirstFrame}
       />
 
-      <SubtitleOverlay
-        cue={cue}
+      <SubtitleStage
         style={subtitleStyle}
         bottomOffset={barHeight}
         topOffset={chromeTop}
@@ -3413,36 +3571,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         locked={locked}
         swipeSides={swipeSides}
         boostRate={boostRate}
-        handlers={{
-          // Note: a SIDE single tap arrives only after the double-tap window
-          // closes, so the very first toggle after the chrome has been hidden
-          // has up to ~300ms of air under it — that is the arbitration cost, and
-          // it is the price for double-tap seeks that never flash the overlay.
-          // A tap in the middle (dead band) still toggles instantly.
-          onTap: () => {
-            if (locked) {
-              // A locked frame's tap only ever reveals the unlock button; it must
-              // not toggle the chrome or unlocking would be a two-tap operation
-              // with an invisible first step.
-              onToggleLock();
-              return;
-            }
-            toggleControls();
-          },
-          // A pair produces ONLY its seek — no chrome flip, no cleanup to race.
-          // `onDoubleTap` exists for future side effects (analytics, HUD), not
-          // for chrome work, which is deliberately out of the gesture path.
-          onDoubleTap: () => {
-            if (locked) return;
-          },
-          onSeek: onGestureSeek,
-          onHoldStart,
-          onHoldMove,
-          onHoldEnd,
-          onVerticalStart,
-          onVerticalMove,
-          onVerticalEnd,
-        }}
+        handlers={gestureHandlers}
       />
 
       <TopBar
@@ -3451,12 +3580,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         episode={epNum}
         episodeLabel={episodeTitle}
         onBack={onBack}
-        onEpisodes={() => {
-          setMenu(null);
-          setPanelOpen(true);
-        }}
+        onEpisodes={onOpenEpisodes}
         onLock={onToggleLock}
-        onSettings={() => setMenu(menu === 'root' || menu === 'subsSettings' ? null : 'root')}
+        onSettings={onToggleSettingsMenu}
         settingsActive={menu === 'root' || menu === 'subsSettings'}
         onPip={onPip}
         pipAvailable={pipSupported}
@@ -3508,7 +3634,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       <BottomBar
         player={player}
         visible={bottomBarUp}
-        skip={{ intro: sources[srcIndex]?.intro ?? null, outro: sources[srcIndex]?.outro ?? null }}
+        skip={skipWindow}
         onSeek={seekTo}
         position={positionSV}
         positionKnown={resumeSettled}
@@ -3529,9 +3655,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         insets={insets}
         onMeasure={onBarMeasure}
         initialTrackWidth={trackWidthRef.current}
-        onTrackWidth={(w) => {
-          trackWidthRef.current = w;
-        }}
+        onTrackWidth={onTrackWidth}
       />
 
       {/**
@@ -3587,20 +3711,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
                 ? onPickSource
                 : onPickSubs
         }
-        onNavigate={(to) => setMenu(to as MenuId)}
-        onClose={() => setMenu(null)}
+        onNavigate={onNavigateMenu}
+        onClose={onCloseMenu}
         insets={insets}
         // Subtitle settings live IN the panel (the drill-in's last entry), so
         // size/position/style are adjustable mid-episode — the same keys and
         // semantics the settings page writes, not a second copy of them.
-        subsStyle={{
-          size: subsSize,
-          position: subsPosition,
-          positionFrac: subsPositionFrac,
-          background: subsBackground,
-          color: subsColor,
-          delayMs: subsDelayMs,
-        }}
+        subsStyle={subsStyleProp}
         onSubsSize={(k) => setSetting('subs.size', k)}
         onSubsPosition={(k) => setSetting('subs.position', k)}
         onSubsPositionFrac={(v) => {
@@ -3644,7 +3761,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         episodes={episodes}
         current={epNum}
         onPick={onPickEpisode}
-        onClose={() => setPanelOpen(false)}
+        onClose={onClosePanel}
         insets={insets}
         onVisibleNumbers={handleVisibleNumbers}
       />

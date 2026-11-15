@@ -447,10 +447,17 @@ console.log('\n4. trap 3 — backgrounding is not a dead stream\n');
     firstSampleBack.health.kind !== 'stalled',
     `got ${firstSampleBack.health.kind}`
   );
+  // ⚠️ THIS ASSERTION CHANGED ON 16 NOV, and the reason is a rule rather than a
+  // test detail. It used to feed the same 40s-gap sample through the module
+  // WITHOUT `noteInterruption` and require a stall — which stopped being true
+  // once `STARVED_SAMPLE_MS` landed: a 40s hole in the samples is itself evidence
+  // that nobody was watching, so the module now forgives it on its own. The
+  // AppState guard is therefore isolated from the gap guard here, with a healthy
+  // tick cadence (1s) and a playhead frozen since long before the app left.
   check(
-    '…without the interruption the SAME sample IS a stall',
+    '…without the interruption the SAME frozen playhead IS a stall',
     observeHealth(
-      state,
+      { ...state, lastMovedAt: 0, lastAt: 49_000, deadlineAt: STALL_MS },
       { position: 10, buffered: 40, status: 'readyToPlay', playing: true, at: 50_000 },
       DEFAULT
     ).health.kind === 'stalled',
@@ -534,6 +541,66 @@ console.log('\n5. the stall watchdog\n');
 // ---------------------------------------------------------------------------
 // 6. The seek grace — our own seeks must not fail the episode
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 5b. A starved app is not a dead stream (16 Nov, low-end device)
+//
+// The report: a notification arrived, the system UI took the device, the tick
+// fired SECONDS late instead of on time, and the watchdog counted the whole gap
+// as a frozen playhead — then failed over, which added a resolve + a replace to
+// a device that was already too slow, and did it again every window.
+// ---------------------------------------------------------------------------
+console.log('\n5b. a starved app is not a dead stream\n');
+
+{
+  // Frozen playhead, and every tick 3s late. Over 36s of wall clock the old rule
+  // saw one uninterrupted frozen stretch and declared a stall three times over.
+  const lateTicks: Step[] = Array.from({ length: 12 }, () => ({
+    dt: 3_000,
+    position: 10,
+    ahead: 30,
+  }));
+  const starvedRun = run(DEFAULT, lateTicks);
+  check(
+    'a tick that arrives 3s late does not accumulate into a stall',
+    !starvedRun.kinds.includes('stalled'),
+    `kinds were ${[...new Set(starvedRun.kinds)].join(', ')}`
+  );
+  check(
+    '…and it grants a fresh window rather than acting on the gap',
+    starvedRun.kinds.every((k) => k === 'unknown' || k === 'inactive'),
+    `a starved sample must decide NOTHING, got ${[...new Set(starvedRun.kinds)].join(', ')}`
+  );
+
+  // THE MUTATION. The same freeze, sampled ON TIME, is still a stall — so the
+  // guard above is the reason the first check passes, and a genuinely dead
+  // stream on a working phone still fails over on schedule.
+  const onTime = run(
+    DEFAULT,
+    Array.from({ length: 36 }, () => ({ dt: 1_000, position: 10, ahead: 30 }))
+  );
+  check(
+    'the same freeze sampled ON TIME is still a stall (the rule is load-bearing)',
+    onTime.kinds.includes('stalled'),
+    `kinds were ${[...new Set(onTime.kinds)].join(', ')}`
+  );
+
+  // And the decisions survive, exactly as they do across a backgrounding: a
+  // starved stretch is not evidence about the connection.
+  const starved = observeHealth(
+    { ...resetHealth(0), dropped: true, lastAt: 0 },
+    { position: 5, buffered: 40, status: 'readyToPlay', playing: true, at: 9_000 },
+    DEFAULT
+  );
+  check(
+    'a starved sample does not forget a tier that was already dropped',
+    starved.state.dropped === true
+  );
+  check(
+    '…and it never asks for a downgrade or a failover',
+    starved.dropTier === false && starved.health.kind === 'unknown'
+  );
+}
+
 console.log('\n6. the seek grace\n');
 
 {
@@ -911,6 +978,17 @@ check(
   'the health tick is gated on a rendered frame',
   /if \(!firstFrameRef\.current\) return;/.test(screen),
   'two watchdogs answering one failure spends two rounds of the budget'
+);
+check(
+  'the health tick does nothing while the app is not in the foreground',
+  /if \(!appActiveRef\.current\) return;/.test(screen) &&
+    /appActiveRef\.current = next === 'active'/.test(screen),
+  'a sample taken from a throttled background timer measures the app, not the stream'
+);
+check(
+  'the 120ms subtitle cue tick is gated the same way',
+  /setInterval\([\s\S]{0,200}!appActiveRef\.current/.test(screen),
+  'eight wake-ups a second to place cues on a picture nobody is looking at'
 );
 check(
   'the tick runs on its OWN interval, not off `timeUpdate`',

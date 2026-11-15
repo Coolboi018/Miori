@@ -196,7 +196,7 @@ export default function PlayerSettings() {
           a switch says "the other one" without ever naming either half. */}
       <SettingSection title="Swipe sides">
         <Text style={[styles.bufferHint, { color: color.text.muted }]}>
-          Slide up or down on the video to change volume or brightness. Which one you get depends on the half you start the slide on. Swiping up always raises.
+          Slide up or down on the video to change volume or brightness. Volume moves the media volume of the phone (the same one the hardware keys move); brightness only changes this player. Which one you get depends on the half you start the slide on. Swiping up always raises.
         </Text>
         {PLAYER_SWIPE_SIDES.map((s) => (
           <SettingRow

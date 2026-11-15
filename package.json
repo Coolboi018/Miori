@@ -37,6 +37,7 @@
     "react-native-safe-area-context": "~5.10.1",
     "react-native-screens": "~4.30.0",
     "react-native-svg": "15.16.0",
+    "react-native-volume-manager": "^2.2.0",
     "react-native-web": "^0.21.4",
     "react-native-webview": "14.0.1",
     "react-native-worklets": "0.13.0"
@@ -67,8 +68,7 @@
     "check:updates": "npx tsx scripts/check-updates.ts",
     "check:scrub": "npx tsx scripts/check-player-scrub.ts",
     "check:subs": "npx tsx scripts/check-subtitles.ts",
-    "check:motion": "npx tsx scripts/check-sweep-spans.ts && npx tsx scripts/check-crossfade.ts",
-    "check:splash": "npx tsx scripts/check-splash.ts"
+    "check:motion": "npx tsx scripts/check-sweep-spans.ts && npx tsx scripts/check-crossfade.ts"
   },
   "private": true
 }

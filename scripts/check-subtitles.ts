@@ -537,6 +537,20 @@ const place = (frac: number, cueH = CUE_2LINE, geom = PHONE, position: 'default'
     'the call site no longer derives a subtitle height from the window',
     !/videoHeight/.test(screen)
   );
+  //
+  // THE CUE IS A STORE, NOT SCREEN STATE (16 Nov). It changes a few times a
+  // second during dialogue; as `useState` in `PlayerScreen` every line
+  // re-rendered both bars, the chips and the timeline for one `Text`.
+  const stage = code('components/player/fullscreen/SubtitleStage.tsx');
+  check(
+    'the live cue is a store the overlay subscribes to, not player state',
+    /useSyncExternalStore\(subscribeCue/.test(stage) &&
+      // `useState<Cue[]>` (the parsed track list) is fine; the LIVE cue is what
+      // must not be screen state.
+      !/useState<Cue \| null>/.test(screen) &&
+      /publishCue\(/.test(screen),
+    'one line of text must not re-render the whole chrome'
+  );
   check(
     'the settings preview uses the same placement, with no second height to keep in sync',
     /<SubtitleOverlay[^>]*bottomOffset=\{PREVIEW_BAR\}/.test(preview) && !/videoHeight/.test(preview)

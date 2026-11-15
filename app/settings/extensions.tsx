@@ -31,7 +31,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { goBack } from '@/lib/nav/back';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/ui/useTheme';
 import { font, radii, spacing } from '@/lib/ui/tokens';
@@ -115,7 +116,7 @@ function SourceAvatar({ id, label }: { id: string; label: string }) {
 export default function ExtensionsSettings() {
   const { color } = useTheme();
   const insets = useSafeAreaInsets();
-  const router = useRouter();
+
   const repoUrls = useSetting('extensions.repoUrls') ?? [];
   const autoUpdate = useSetting('extensions.autoUpdate');
   const setSetting = useSetSetting();
@@ -274,7 +275,7 @@ export default function ExtensionsSettings() {
           owns its scroll areas (see the file header). */}
       <View style={[styles.header, { paddingTop: insets.top + spacing.md }]}>
         <Pressable
-          onPress={() => router.back()}
+          onPress={() => goBack()}
           accessibilityRole="button"
           accessibilityLabel="Back to settings"
           hitSlop={10}

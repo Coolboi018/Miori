@@ -1,14 +1,14 @@
-// Transient on-video readouts: the held-press speed pill and the double-tap
-// seek flash. Both are receipts, not controls.
+// Transient on-video readouts: the held-press speed pill, the double-tap seek
+// flash and the volume / brightness bar. All three are receipts, not controls.
 //
 // The split from `components/player/PlayerControls` is deliberate. Those buttons
 // live in the chrome, and the chrome auto-hides after 3s (`motion.controlsHide`),
-// so a seek control that disappears is a control nobody can find. These two
-// gestures belong to the video surface, are expressed only as an overlay for
-// the half-second they need, and then get out of the way.
+// so a seek control that disappears is a control nobody can find. These gestures
+// belong to the video surface, are expressed only as an overlay for the half
+// second they need, and then get out of the way.
 
-import { memo, useEffect, useSyncExternalStore } from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { memo, useEffect, useState } from 'react';
+import { StyleSheet, View, useWindowDimensions, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   Easing,
@@ -21,12 +21,17 @@ import { LinearGradient } from 'expo-linear-gradient';
 
 import { AppIcon } from '@/components/ui/AppIcon';
 import { formatSeekDelta } from '@/lib/player/format';
-import { readSideHud, subscribeSideHud } from '@/lib/player/sideHud';
+import {
+  readSideHud,
+  subscribeSideHud,
+  type SideHudKind,
+  type SideHudSide,
+} from '@/lib/player/sideHud';
 import { hudSideFor } from './verticalSwipe';
 import { formatRate } from '@/lib/player/speed';
 import { font, radii } from '@/lib/ui/tokens';
 
-/** Shared by both HUDs; they appear and leave on the same rhythm. */
+/** Shared by all three HUDs; they appear and leave on the same rhythm. */
 const SHOW_MS = 120;
 const HIDE_MS = 200;
 
@@ -52,10 +57,6 @@ export const SPEED_PILL_TOP = 12;
  * row; that only happens when a hold begins within the ~3s window the chrome
  * stays open, and the chrome is ephemeral while the pill is a receipt for a
  * gesture that is happening right now.
- *
- * This is why the component no longer takes the chrome offsets the band
- * placement needed — `GestureSurface` keeps them as props for other overlays,
- * but this one has no use for a variable input it was just told to ignore.
  */
 export const SpeedHud = memo(function SpeedHud({ rate }: { rate: number }) {
   const p = useSharedValue(0);
@@ -139,69 +140,117 @@ export const SeekHud = memo(function SeekHud({
 });
 
 /**
- * The volume / brightness readout — a VERTICAL bar on the half being swiped.
+ * The volume / brightness readout — a slim VERTICAL bar on the half being swiped.
  *
- * WHY THE SIDE AND NOT THE MIDDLE. The first version was a centred pill, and it
+ * WHY THE EDGE AND NOT THE MIDDLE. The first version was a centred pill, and it
  * was the wrong place twice over: it covered the frame the user is watching (the
  * one thing a HUD must never do), and it sat in the middle of the gesture's own
  * travel — the finger drags up and down the frame's centre, so the readout was
- * under the hand. Every player that has this gesture (VLC, MX, YouTube) puts it on
- * the edge the finger started on, and for good reason: the eye is already there,
- * waiting for the thing it is changing, and nothing in the picture is hidden.
+ * under the hand. Every player that has this gesture (VLC, MX, YouTube) puts it
+ * on the edge the finger started on.
  *
- * The side comes from the DRAG (`sideForX`), not from the knob: the halves are
- * swappable in settings, so deriving "volume = right" in the view would draw the
- * bar on the wrong edge for anyone who swapped them.
+ * The side comes from the DRAG (`sideForX`, carried in the store), not from the
+ * knob: the halves are swappable in settings, so deriving "volume = right" in the
+ * view would draw the bar on the wrong edge for anyone who swapped them. And it
+ * DRAWS ON THE OPPOSITE EDGE (`hudSideFor`, the one refinement that makes the
+ * placement usable) — the finger is ON the half it started on, so the readout
+ * goes on the one strip of screen nobody is touching.
  *
- * AND IT DRAWS ON THE OPPOSITE EDGE (`hudSideFor`) — the one refinement that makes
- * the placement actually usable. The finger is ON the half it started on; a bar
- * there is a bar under the thumb, half of it behind the hand and the rest in the
- * only place the eye is not looking. Mirroring it puts the readout on the one
- * strip of screen nobody is touching. The knob is unchanged — only the display
- * moves.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * IT DRAWS ON THE UI THREAD AND DOES NOT RE-RENDER FOR A NUMBER. 16 Nov, and
+ * this is the whole reason the component looks the way it does.
  *
- * THE TRACK IS THE POINT. A number alone makes the user read; a vertical fill
- * tells them "near the top", which is the question they actually have, and it
- * reads at a glance in peripheral vision while their thumb is on the glass. The
- * track is a fraction of the WINDOW height rather than a constant — landscape on
- * a short phone has ~380pt to work with, and a bar sized for a tall one would
- * touch both edges.
+ * The previous version re-rendered React once per visible percent — up to 100
+ * renders across a sweep — and every one of those renders re-laid-out a
+ * PERCENTAGE-HEIGHT fill, i.e. a Yoga pass plus a native view update, on top of
+ * a playing video, under a moving finger. On a low-end phone that burst starves
+ * the decoder and the stutter outlives the gesture. So:
  *
- * IT SUBSCRIBES TO ITS OWN STORE. `PlayerScreen` applies the value to the engine
- * and never re-renders; this is the only component that knows the number. That is
- * why the drag can be smooth on a screen with this much chrome in it.
+ *   - there is NO number in this HUD (a text node is the thing that would force
+ *     a render per percent, and the bar already answers "near the top", which is
+ *     the question the user actually has);
+ *   - the fill is a SHARED VALUE in POINTS, so a drag writes one number to the
+ *     UI thread and React is not involved at all;
+ *   - React state holds only the ICON and the EDGE, which change at most twice
+ *     per gesture (kind, side) — never while the finger is moving.
+ *
+ * The percentage height is deliberately gone: animating a percentage re-runs
+ * layout for every step (the same trap `progress.md` records for width).
  */
 export const SideHud = memo(function SideHud() {
-  const hud = useSyncExternalStore(subscribeSideHud, readSideHud, readSideHud);
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
-  const p = useSharedValue(0);
-  const shown = hud.kind != null;
+  /** Icon + edge only — see the header. A value never lands here. */
+  const [hud, setHud] = useState<{ kind: SideHudKind | null; side: SideHudSide }>({
+    kind: null,
+    side: 'left',
+  });
+
+  /**
+   * A fraction of the WINDOW height rather than a constant — landscape on a
+   * short phone has ~380pt to work with, and a bar sized for a tall one would
+   * touch both edges.
+   */
+  const trackHeight = Math.round(Math.min(176, Math.max(96, height * 0.3)));
+
+  const track = useSharedValue(trackHeight);
+  const fill = useSharedValue(0);
+  const shown = useSharedValue(0);
   /** Mirrored from the drag — see the header. */
   const left = hudSideFor(hud.side) === 'left';
 
+  /**
+   * Rotation, and the first value ever set: the fill is in POINTS, so a 40%
+   * level has to be re-derived against the new track or it would draw at 40% of
+   * the OLD length.
+   */
   useEffect(() => {
-    p.value = withTiming(shown ? 1 : 0, {
-      duration: shown ? SHOW_MS : HIDE_MS,
-      easing: Easing.out(Easing.quad),
+    track.value = trackHeight;
+    fill.value = readSideHud().value * trackHeight;
+  }, [trackHeight, track, fill]);
+
+  /**
+   * THE DRAG PATH. Subscribed imperatively (not through React state) so the only
+   * work a value change causes is one shared-value write on the UI thread.
+   */
+  useEffect(() => {
+    let kind = readSideHud().kind;
+    let side = readSideHud().side;
+    return subscribeSideHud(() => {
+      const s = readSideHud();
+      fill.value = s.value * track.value;
+
+      // THE DRAG PATH ENDS HERE. A value change touches one shared value and
+      // returns: no setState, not even a bailing one, so React does no work at
+      // all while a finger moves. Icon and edge below are the only things that
+      // can bring it back in, and they change at most twice per gesture.
+      if (s.kind === kind && s.side === side) return;
+
+      const kindChanged = s.kind !== kind;
+      kind = s.kind;
+      side = s.side;
+      setHud({ kind, side });
+      if (kindChanged) {
+        shown.value = withTiming(s.kind ? 1 : 0, {
+          duration: s.kind ? SHOW_MS : HIDE_MS,
+          easing: Easing.out(Easing.quad),
+        });
+      }
     });
-  }, [p, shown]);
+  }, [fill, shown, track]);
 
   /**
    * Fade, plus a small slide FROM the edge it belongs to — the bar arrives out of
-   * the side the finger is on, which is what makes it read as part of the gesture
+   * the side it hangs on, which is what makes it read as part of the gesture
    * rather than as an overlay that happened to appear.
    */
-  const style = useAnimatedStyle(() => ({
-    opacity: p.value,
-    transform: [
-      { translateX: (1 - p.value) * (left ? -14 : 14) },
-      { scale: 0.96 + p.value * 0.04 },
-    ],
+  const plateStyle = useAnimatedStyle(() => ({
+    opacity: shown.value,
+    transform: [{ translateX: (1 - shown.value) * (left ? -10 : 10) }],
   }));
 
-  const percent = Math.round(hud.value * 100);
-  const trackHeight = Math.round(Math.min(220, Math.max(120, height * 0.42)));
+  /** Points, not a percentage: a height animation here must not re-run layout. */
+  const fillStyle = useAnimatedStyle(() => ({ height: fill.value }));
 
   return (
     <View
@@ -209,23 +258,22 @@ export const SideHud = memo(function SideHud() {
         styles.sideAnchor,
         // Clear of the notch/cutout in landscape, plus a gutter so the bar is not
         // glued to the bezel.
-        left ? { left: insets.left + 18 } : { right: insets.right + 18 },
+        left ? { left: insets.left + 16 } : { right: insets.right + 16 },
       ]}
       pointerEvents="none"
     >
-      <Animated.View style={[styles.sidePlate, style]}>
-        <AppIcon
-          name={hud.kind === 'volume' ? 'volumeOn' : 'brightness'}
-          size={20}
-          color="#fff"
-          strokeWidth={2}
-        />
+      <Animated.View style={[styles.sidePlate, plateStyle]}>
         <View style={[styles.sideTrack, { height: trackHeight }]}>
           {/* Filled from the BOTTOM up: 0% is an empty track, 100% a full one.
               A top-down fill would read as a download bar. */}
-          <View style={[styles.sideFill, { height: `${percent}%` }]} />
+          <Animated.View style={[styles.sideFill, fillStyle]} />
         </View>
-        <Text style={styles.sidePercent}>{percent}</Text>
+        <AppIcon
+          name={hud.kind === 'volume' ? 'volumeOn' : 'brightness'}
+          size={16}
+          color="#fff"
+          strokeWidth={2}
+        />
       </Animated.View>
     </View>
   );
@@ -292,29 +340,22 @@ const styles = StyleSheet.create({
     bottom: 0,
     justifyContent: 'center',
   },
+  // Deliberately plain: a slim plate, a bar, an icon. No panel, no label, nothing
+  // that has to be re-measured while a finger is moving.
   sidePlate: {
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 14,
-    paddingHorizontal: 10,
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
     borderRadius: radii.full,
-    // Lighter than the speed pill on purpose: this one sits at the edge of the
-    // picture and must not read as a panel.
-    backgroundColor: 'rgba(0,0,0,0.42)',
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
   sideTrack: {
-    width: 6,
+    width: 5,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.22)',
     overflow: 'hidden',
     justifyContent: 'flex-end',
   },
-  sideFill: { width: 6, borderRadius: 3, backgroundColor: '#fff' },
-  sidePercent: {
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 12,
-    lineHeight: 16,
-    fontVariant: ['tabular-nums'],
-  },
+  sideFill: { width: 5, borderRadius: 3, backgroundColor: '#fff' },
 });

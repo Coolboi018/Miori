@@ -10,4 +10,4 @@
 import { useColorScheme as useColorSchemeCore } from 'react-native';
 import { resolveThemeName } from '@/lib/ui/tokens';
 
-export const useColorScheme = (): 'dark' | 'light' => resolveThemeName(useColorSchemeCore());
+export const useColorScheme = (): 'dark' => resolveThemeName(useColorSchemeCore());

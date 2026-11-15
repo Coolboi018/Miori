@@ -32,7 +32,7 @@ const nonMonotonic = Object.entries(spacing).filter(
 console.log('palettes      :', Object.keys(themes).join(', '));
 console.log(
   'scheme resolve:',
-  ['light', 'dark', null, undefined, 'unspecified']
+  ['dark', null, undefined, 'unspecified']
     .map((s) => `${String(s)}->${resolveThemeName(s as never)}`)
     .join('  ')
 );
@@ -43,9 +43,9 @@ console.log('scale sizes   :', {
   motion: Object.keys(motion).length,
   shadows: Object.keys(shadows).length,
 });
-console.log('dark bg       :', themes.dark.bg.primary, '| light bg:', themes.light.bg.primary);
-console.log('palettes differ:', themes.dark.bg.primary !== themes.light.bg.primary);
-console.log('paletteFor() ok:', paletteFor('light').text.primary);
+console.log('dark bg       :', themes.dark.bg.primary, '| oled bg:', themes.oled.bg.primary);
+console.log('palettes differ:', themes.dark.bg.primary !== themes.oled.bg.primary);
+console.log('paletteFor() ok:', paletteFor('dark').text.primary);
 console.log('poster ratio  :', layout.posterRatio);
 
 if (nonMonotonic.length) problems.push(`spacing not monotonic: ${nonMonotonic.map(([k]) => k).join(', ')}`);

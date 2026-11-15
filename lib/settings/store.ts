@@ -30,10 +30,12 @@ const STORAGE_KEY = 'miori:settings';
  * only ever sees the `key`s, which is what the `home.tileStyle` union is
  * derived from — so adding a design is one entry here and nothing else.
  */
+// Locked dark: light mode is no longer supported (the app is video-led and the
+// light palette was never finished — 42 themed components still hardcode dark
+// colours). Only OLED + Dark remain.
 export const APP_THEMES = [
   { key: 'oled', label: 'OLED', hint: 'Pure black — saves battery on OLED screens' },
   { key: 'dark', label: 'Dark', hint: 'The default dark palette' },
-  { key: 'light', label: 'Light', hint: 'Light mode' },
 ] as const;
 export type AppThemeKey = (typeof APP_THEMES)[number]['key'];
 
@@ -329,8 +331,8 @@ interface SettingsSchema {
   // Placeholder for the next real preference. Kept non-empty so the store,
   // hydration, and reset paths stay exercised.
   'app.ready': boolean;
-  /** App colour theme. 'oled' is pure black (default). */
-  'app.theme': 'dark' | 'light' | 'oled';
+  /** App colour theme. 'oled' is pure black (default). Locked dark — no light. */
+  'app.theme': 'dark' | 'oled';
   /**
    * Whether the home screen shows the Continue Watching row. Turning it off
    * hides the section AND skips its network call — the list is an AniList

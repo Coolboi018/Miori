@@ -27,8 +27,11 @@ function compat(name: ThemeName): Compat {
   };
 }
 
+// Locked dark: light mode removed. `light` is aliased to dark so the legacy
+// Themed.tsx shim (used only by +not-found.tsx) keeps working without a
+// separate palette.
 const Colors = {
-  light: compat('light'),
+  light: compat('dark'),
   dark: compat('dark'),
 };
 

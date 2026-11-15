@@ -208,47 +208,6 @@ const dark: Palette = {
   },
 };
 
-const light: Palette = {
-  bg: {
-    primary: '#f2f2f5',
-    surface: '#ffffff',
-    surfaceHover: '#e9e9ef',
-    elevated: '#e6e6ec',
-    overlay: 'rgba(20, 20, 26, 0.45)',
-    scrim: 'rgba(0, 0, 0, 0.55)',
-  },
-  text: {
-    primary: '#14141a',
-    secondary: '#5a5a68',
-    muted: '#8a8a97',
-    onMedia: '#ffffff',
-  },
-  accent: {
-    base: '#14141a',
-    hover: '#2a2a33',
-    muted: 'rgba(0, 0, 0, 0.07)',
-    glow: 'rgba(0, 0, 0, 0.08)',
-  },
-  // A step darker than dark mode's. Light mode has more competing luminance, so
-  // the same rose washes out against a white page and the "on" state stops
-  // separating from "off" at a glance.
-  like: {
-    base: '#e11d48',
-    muted: 'rgba(225, 29, 72, 0.12)',
-    on: '#ffffff',
-  },
-  border: {
-    muted: 'rgba(0, 0, 0, 0.09)',
-    strong: 'rgba(0, 0, 0, 0.18)',
-  },
-  status: {
-    success: '#16a34a',
-    warning: '#d97706',
-    danger: '#dc2626',
-    info: '#2563eb',
-  },
-};
-
 /**
  * Shadows. Android uses `elevation` and ignores the iOS shadow* props; iOS
  * ignores `elevation`. Both have to be set or the card looks flat on one
@@ -337,7 +296,8 @@ const oled: Palette = {
   },
 };
 
-export const themes = { dark, light, oled } as const;
+// Locked dark: only dark + oled. Light mode removed — see store APP_THEMES.
+export const themes = { dark, oled } as const;
 export type ThemeName = keyof typeof themes;
 
 /** Every value RN's `useColorScheme()` is allowed to return, plus null/undefined. */
@@ -352,8 +312,10 @@ export type RawColorScheme = 'light' | 'dark' | 'unspecified' | null | undefined
  * every input, and defaults to dark because the app is video-led and a light
  * flash on first launch is worse than a dark one.
  */
-export function resolveThemeName(scheme: RawColorScheme): 'dark' | 'light' {
-  return scheme === 'light' ? 'light' : 'dark';
+// Locked dark: the system colour scheme no longer selects a theme. Everything
+// resolves to dark; OLED is chosen via the `app.theme` setting, not the OS.
+export function resolveThemeName(scheme: RawColorScheme): 'dark' {
+  return 'dark';
 }
 
 /** Non-hook palette access, for module-scope constants and StyleSheet.create. */

@@ -10,6 +10,23 @@
 // transforms and opacity land on the UI thread every time, in Expo Go and in a
 // release APK. The image itself never needs to animate, so it does not.
 //
+// ⚠️ AND THE TIMELINE DOES NOT START UNTIL THE LOGO CAN BE PAINTED.
+//
+// Two different ways this splash has been "still", and the fixes are separate:
+//
+//   1. THE DECODE. The logo is a bundled bitmap decoded asynchronously, so a
+//      timeline started on mount can finish before the first frame containing
+//      the logo is painted — the user sees the end state immediately. `arm`
+//      waits for the image's own `onLoad` (with `SPLASH.decodeFallbackMs` as a
+//      ceiling, so a hung decode cannot mute the splash).
+//
+//   2. REDUCE MOTION. `useReducedMotion()` is true on any device whose animator
+//      duration scale is 0 — which is battery saver, not just the accessibility
+//      toggle — and this path used to hold the logo at FULL opacity and time it
+//      to 1. An animation from 1 to 1 is a still frame. It now fades in from
+//      `SPLASH.fromOpacity` like the normal path and drops only the zoom, which
+//      is the part reduce-motion is actually about.
+//
 // The rest is the low-end work from 14 Nov, kept:
 //   - `expo-image` instead of `Animated.Image` (RN's decoder takes the full
 //     resolution and adds an implicit ~300ms Android fade on top of ours);
@@ -18,7 +35,7 @@
 //   - a watchdog in `app/_layout.tsx` so a delayed completion callback can
 //     never leave the overlay covering the app.
 
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import Animated, {
@@ -33,16 +50,39 @@ import { SPLASH } from '@/lib/ui/splash';
 
 export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
   const reduced = useReducedMotion();
-  const logoOpacity = useSharedValue(reduced ? 1 : SPLASH.fromOpacity);
+  // Both paths start invisible — see (2) above; only the scale differs, and
+  // reduce motion keeps it at 1 so there is no travel at all.
+  // The explicit `<number>` is load-bearing: `SPLASH` is `as const`, so
+  // `fromOpacity` is the LITERAL type `0` and `SharedValue<0>` cannot be timed
+  // to 1.
+  const logoOpacity = useSharedValue<number>(SPLASH.fromOpacity);
   const logoScale = useSharedValue(reduced ? 1 : SPLASH.fromScale);
   const containerOpacity = useSharedValue(1);
 
+  /**
+   * Armed by the logo's decode, or by the fallback if the decode never reports.
+   * A state flag rather than a ref: the timeline below has to run on a commit,
+   * and it is the effect's own dependency that starts it exactly once.
+   */
+  const [armed, setArmed] = useState(false);
+  const arm = useCallback(() => setArmed(true), []);
+
   useEffect(() => {
+    const fallback = setTimeout(arm, SPLASH.decodeFallbackMs);
+    return () => clearTimeout(fallback);
+  }, [arm]);
+
+  useEffect(() => {
+    if (!armed) return;
+
     if (reduced) {
-      // Reduce motion: no zoom, but still a short cross-fade — a completely
-      // still screen is indistinguishable from a frozen one.
-      logoOpacity.value = withTiming(1, { duration: SPLASH.reducedFadeMs });
-      logoScale.value = 1;
+      // No zoom (that is the motion being asked for less of) but a real
+      // cross-fade from black, because a completely still screen is
+      // indistinguishable from a frozen one.
+      logoOpacity.value = withTiming(1, {
+        duration: SPLASH.reducedFadeMs,
+        easing: Easing.out(Easing.quad),
+      });
     } else {
       logoOpacity.value = withTiming(1, {
         duration: SPLASH.fadeMs,
@@ -64,7 +104,7 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
       });
     }, hold);
     return () => clearTimeout(timer);
-  }, [reduced, logoOpacity, logoScale, containerOpacity, onFinish]);
+  }, [armed, reduced, logoOpacity, logoScale, containerOpacity, onFinish]);
 
   const logoStyle = useAnimatedStyle(() => ({
     opacity: logoOpacity.value,
@@ -91,6 +131,10 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
           priority="high"
           // expo-image's own cross-fade would fight the opacity animation above.
           transition={0}
+          // The timeline's real trigger. `onError` arms it too: a logo that
+          // cannot be decoded must not take the whole splash down with it.
+          onLoad={arm}
+          onError={arm}
         />
       </Animated.View>
     </Animated.View>

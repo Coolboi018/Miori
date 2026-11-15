@@ -128,13 +128,15 @@ export const PLAYER_ENGINES = [
 export type PlayerEngineKey = (typeof PLAYER_ENGINES)[number]['key'];
 
 /**
- * Buffer profile. 'low' holds the least memory in front of the playhead —
- * the default for low-RAM devices; 'high' holds more so a flaky CDN has
- * slack to stutter through without pausing.
+ * Buffer profile. 'balanced' (shown as Normal) is the default — enough held in
+ * front of the playhead that an ordinary connection stutters less, without the
+ * memory 'high' costs. 'low' holds the least memory in front of the playhead,
+ * for low-RAM devices; 'high' holds more so a flaky CDN has slack to stutter
+ * through without pausing.
  */
 export const PLAYER_BUFFERS = [
   { key: 'low', label: 'Low', hint: 'Least memory — best for low-RAM devices' },
-  { key: 'balanced', label: 'Normal', hint: 'Recommended for most connections' },
+  { key: 'balanced', label: 'Normal', hint: 'Recommended for most connections (default)' },
   { key: 'high', label: 'High', hint: 'Most slack for a weak connection' },
 ] as const;
 
@@ -179,7 +181,7 @@ export type PlayerAudioMixingKey = (typeof PLAYER_AUDIO_MIXING)[number]['key'];
  */
 export const PLAYER_CACHES = [
   { key: 'low', label: 'Low', hint: '64 MB cache limit', bytes: 64 * 1024 * 1024 },
-  { key: 'balanced', label: 'Normal', hint: '192 MB cache limit', bytes: 192 * 1024 * 1024 },
+  { key: 'balanced', label: 'Normal', hint: '192 MB cache limit (default)', bytes: 192 * 1024 * 1024 },
   { key: 'high', label: 'High', hint: '384 MB cache limit', bytes: 384 * 1024 * 1024 },
 ] as const;
 export type PlayerCacheKey = (typeof PLAYER_CACHES)[number]['key'];
@@ -217,15 +219,17 @@ export const PLAYER_TRIGGER_IDS = ['speed', 'quality', 'source', 'subs'] as cons
  * Subtitle text size. The NUMBERS live in `lib/subtitles/style.ts` — this is
  * only the words and the reasons.
  *
- * The keys are `'medium'`, not `'default'`, because the middle step is the one
- * that has to stay put: it is the 16pt the overlay hardcoded for months, so a
- * user who changes nothing sees no change.
+ * `'medium'` is a named key rather than `'default'` because it is the 16pt the
+ * overlay hardcoded for months and has to stay put. The app DEFAULT is `'big'`
+ * (20pt) — see `lib/subtitles/style.ts` for why the size is the one appearance
+ * default that was deliberately moved.
  */
 export const SUBTITLE_SIZES = [
   { key: 'tiny', label: 'Tiny', hint: 'Fits the most text — best on a small screen' },
   { key: 'small', label: 'Small', hint: 'Compact' },
   { key: 'medium', label: 'Medium', hint: 'What the player has always used' },
-  { key: 'normal', label: 'Normal', hint: 'Default — 18pt' },
+  { key: 'normal', label: 'Normal', hint: 'The old default — 18pt' },
+  { key: 'big', label: 'Big', hint: 'Default — 20pt' },
   { key: 'large', label: 'Large', hint: 'Easier to read at arm’s length' },
   { key: 'xlarge', label: 'X-Large', hint: 'Big, for a bright room' },
   { key: 'huge', label: 'Huge', hint: 'For very young eyes' },
@@ -576,21 +580,22 @@ export const DEFAULTS: SettingsSchema = {
   'tabs.segmentedColor': '#ffffff',
   'episodes.order': 'desc',
   'player.engine': 'auto',
-  'player.buffer': 'low',
+  'player.buffer': 'balanced',
   'player.seekPrecision': DEFAULT_PRECISION,
   'player.audioMixing': 'auto',
   'player.preservesPitch': true,
   'player.autoSkipIntro': true,
   'player.autoSkipOutro': false,
-  'player.cache': 'low',
+  'player.cache': 'balanced',
   'player.defaultSource': 'mega',
   'player.defaultQuality': 'auto',
   'player.hiddenControls': '[]',
   'player.speed': 1,
   // The appearance defaults are the numbers `SubtitleOverlay.tsx` had
-  // hardcoded. They are load-bearing, not arbitrary — see `lib/subtitles/style.ts`.
+  // hardcoded — except the size, which is 20pt by design. They are
+  // load-bearing, not arbitrary — see `lib/subtitles/style.ts`.
   'subs.language': 'auto',
-  'subs.size': 'normal',
+  'subs.size': 'big',
   'subs.position': 'default',
   'subs.positionFrac': DEFAULT_POSITION_FRAC,
   'subs.background': 'plate',

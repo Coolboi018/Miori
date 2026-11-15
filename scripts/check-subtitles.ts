@@ -11,11 +11,19 @@
  *      one frame. That is a flicker across every cue transition in the episode,
  *      which is exactly the class of bug nobody reports and everybody notices.
  *
- *   2. THE DEFAULT IS THE OLD HARDCODED OVERLAY. Turning three hardcoded numbers
- *      into settings is only safe if a user who touches nothing sees no change.
- *      Every default below is asserted against the literal values
- *      `SubtitleOverlay.tsx` carried for months — except the vertical
- *      placement, whose default was REPLACED on a device verdict (see point 3).
+ *   2. THE DEFAULTS ARE THE OLD HARDCODED OVERLAY. Turning three hardcoded
+ *      numbers into settings is only safe if a user who touches nothing sees no
+ *      change. Every default below is asserted against the literal values
+ *      `SubtitleOverlay.tsx` carried for months — EXCEPT the text size, moved
+ *      to 20pt by an explicit ask (see point 2b), and the vertical placement,
+ *      whose default was REPLACED on a device verdict (see point 3).
+ *
+ *   2b. THE SIZE DEFAULT IS 20pt, AND THE LADDER STILL CLIMBS. The default is
+ *      `'big'` now, with `'normal'` (18pt) and everything below still selectable
+ *      — so the check asserts BOTH the 20pt default AND that the ladder is
+ *      strictly increasing through the inserted step. A new size that landed
+ *      out of order (a slider where "Big" draws smaller than "Normal") is
+ *      invisible in a screenshot and obvious here.
  *
  *   3. THE VERTICAL PLACEMENT IS ONE MEASURED BAND. `subtitleBottomOffset`
  *      spans the container the overlay itself measured: 0% at the bottom edge,
@@ -262,7 +270,7 @@ console.log('\n[appearance defaults]');
 
 {
   const d = defaultSubtitleStyle();
-  check("'normal' is the 18pt default", d.fontSize === 18, `${d.fontSize}pt`);
+  check("'big' is the 20pt default", d.fontSize === 20, `${d.fontSize}pt`);
   check('line height is stated, not left to the font metrics', d.lineHeight > d.fontSize, `${d.lineHeight}`);
   check("'default' uses the built-in placement fraction", d.positionFrac === DEFAULT_POSITION_FRAC, `${d.positionFrac}`);
   check(
@@ -288,7 +296,7 @@ console.log('\n[appearance defaults]');
   const junk = [undefined, null, '', 'gigantic', 42, 'MEDIUM ', {}, []] as unknown[];
   check(
     'a junk stored size falls back to the default',
-    junk.every((j) => resolveSubtitleStyle({ size: j as never, position: 'default', positionFrac: undefined, background: 'plate', color: 'white' }).fontSize === 18)
+    junk.every((j) => resolveSubtitleStyle({ size: j as never, position: 'default', positionFrac: undefined, background: 'plate', color: 'white' }).fontSize === 20)
   );
   check(
     'a junk stored position falls back to the default',
@@ -315,8 +323,13 @@ console.log('\n[appearance defaults]');
 check(
   'the size ladder increases',
   SUBTITLE_TYPEGRAPHY.small.fontSize < SUBTITLE_TYPEGRAPHY.medium.fontSize &&
-    SUBTITLE_TYPEGRAPHY.medium.fontSize < SUBTITLE_TYPEGRAPHY.large.fontSize &&
-    SUBTITLE_TYPEGRAPHY.large.fontSize < SUBTITLE_TYPEGRAPHY.huge.fontSize
+    SUBTITLE_TYPEGRAPHY.medium.fontSize < SUBTITLE_TYPEGRAPHY.normal.fontSize &&
+    SUBTITLE_TYPEGRAPHY.normal.fontSize < SUBTITLE_TYPEGRAPHY.big.fontSize &&
+    SUBTITLE_TYPEGRAPHY.big.fontSize < SUBTITLE_TYPEGRAPHY.large.fontSize &&
+    SUBTITLE_TYPEGRAPHY.large.fontSize < SUBTITLE_TYPEGRAPHY.huge.fontSize,
+  Object.entries(SUBTITLE_TYPEGRAPHY)
+    .map(([k, v]) => `${k}:${v.fontSize}`)
+    .join(' ')
 );
 check('default position frac is in [0, 1]', DEFAULT_POSITION_FRAC >= 0 && DEFAULT_POSITION_FRAC <= 1, `${DEFAULT_POSITION_FRAC}`);
 

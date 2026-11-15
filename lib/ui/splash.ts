@@ -19,8 +19,23 @@ export const SPLASH = {
   holdMs: 620,
   /** The overlay fading away to reveal the app. */
   exitMs: 260,
-  /** Reduce-motion: no scale travel, only a short cross-fade. */
-  reducedFadeMs: 160,
+  /**
+   * Reduce motion: no scale travel, but still a REAL fade-in.
+   *
+   * ⚠️ THIS PATH IS THE ONE LOW-END PHONES ACTUALLY TAKE, and it used to be a
+   * still frame. Its logo started at FULL opacity and was then timed to 1 — an
+   * animation from 1 to 1 — so the only motion left was the overlay's fade-out
+   * 300ms later, which on black reads as a frozen screen. That is the
+   * "it's just a static logo" report, and it is not a corner case:
+   * `useReducedMotion()` is TRUE whenever the platform's animator duration
+   * scale is 0, which Android sets under battery saver as well as under
+   * Settings → Accessibility → Remove animations.
+   *
+   * A fade is not what reduce-motion exists to suppress — travel and zoom are.
+   * So the logo fades in from `fromOpacity` here too, and only the scale is
+   * dropped.
+   */
+  reducedFadeMs: 220,
   reducedHoldMs: 300,
   reducedExitMs: 160,
   /**
@@ -31,6 +46,41 @@ export const SPLASH = {
   fromScale: 0.86,
   /** Where the logo's opacity starts. 0 = a real fade-in, not a still frame. */
   fromOpacity: 0,
+  /**
+   * HOW LONG THE ENTRANCE WAITS FOR THE LOGO ITSELF.
+   *
+   * The timeline used to start on mount, and the logo is a bundled bitmap that
+   * is decoded asynchronously — so on a cold start the animation could be most
+   * of the way through before the FIRST frame with a logo in it was painted,
+   * and the user saw the final state. `AnimatedSplash` therefore arms the
+   * timeline on the image's own `onLoad`, and this is the fallback for a decode
+   * that never reports: past this the entrance starts anyway, because a late
+   * logo appearing mid-fade still looks alive, while a splash that waits on a
+   * hung decode looks broken.
+   *
+   * A CEILING ON WAITING, NOT A DELAY TO SIT THROUGH: a warm decode fires
+   * `onLoad` in the same frame the image arrives, so this costs nothing on the
+   * common path.
+   */
+  decodeFallbackMs: 240,
+  /**
+   * The native splash's OWN exit fade, handed to `SplashScreen.setOptions`.
+   *
+   * The library default is 400ms (`SplashScreenModule.kt`), and while it runs it
+   * is composited OVER the in-app overlay — the same logo, one static and one
+   * animating, one on top of the other — so the first 400ms of a 320ms fade-in
+   * is spent behind a picture that is not moving. 200ms is long enough to read
+   * as a fade rather than a cut and short enough that the entrance plays where
+   * the user can see it.
+   */
+  nativeExitMs: 200,
+  /**
+   * A beat between the native fade finishing and the in-app entrance starting.
+   * `hideAsync` resolves when the native fade STARTS, not when it ends, so the
+   * hand-off is timed off `nativeExitMs` instead — this is the margin that keeps
+   * the entrance from beginning on a frame that is still covered.
+   */
+  handoffGapMs: 60,
   /**
    * ABSOLUTE BACKSTOP, not artwork. If the animation's completion callback never
    * arrives (stalled UI thread, an interrupted animation on a slow device), the
@@ -48,4 +98,14 @@ export function splashTotalMs(reduced: boolean): number {
   return reduced
     ? SPLASH.reducedFadeMs + SPLASH.reducedHoldMs + SPLASH.reducedExitMs
     : SPLASH.holdMs + SPLASH.exitMs;
+}
+
+/**
+ * From the native splash starting to fade out to the in-app entrance being
+ * allowed to start — the gap the root layout waits out before mounting the
+ * overlay. Deliberately NOT part of `splashTotalMs()`: that measures the overlay
+ * the user is watching, and this is time spent behind the native one.
+ */
+export function handoffMs(): number {
+  return SPLASH.nativeExitMs + SPLASH.handoffGapMs;
 }

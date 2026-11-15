@@ -854,14 +854,23 @@ console.log('\nthe player honours the plan (source)');
 console.log('\nthe video cache setup is guarded (source)');
 {
   const layout = readFileSync('app/_layout.tsx', 'utf8');
-  const cacheSetup = /const \[playerCacheReady[\s\S]*?\n  \}, \[\]\);/.exec(layout);
+  const cacheSetup = /const \[settingsReady[\s\S]*?\n  \}, \[\]\);/.exec(layout);
 
   check('the cache effect was extracted', !!cacheSetup, 'an empty extraction would make every check below vacuous');
   const setup = cacheSetup ? cacheSetup[0] : '';
 
   check('the two cache calls are in SEPARATE try blocks', (setup.match(/try\s*{/g) ?? []).length >= 2);
   check('the clear is gated on the size call having succeeded', /if \(sizeApplied\)[\s\S]{0,80}clearVideoCacheAsync/.test(setup));
-  check('a failed size call does not skip the splash gate', /catch[\s\S]{0,600}setPlayerCacheReady\(true\)/.test(setup));
+  // WAS `catch … setPlayerCacheReady(true)`, the weaker promise that a failed
+  // cache call would not keep the splash up. The gate now opens BEFORE the cache
+  // work starts, which makes every one of these call sites irrelevant to launch
+  // time — so the pin is the ordering itself. See the note on `settingsReady`.
+  const gateAt = setup.indexOf('setSettingsReady(true)');
+  const firstCacheCallAt = setup.indexOf('setVideoCacheSizeAsync');
+  check(
+    'the launch gate opens before the cache work starts',
+    gateAt >= 0 && firstCacheCallAt >= 0 && gateAt < firstCacheCallAt
+  );
 
   // The old wording blamed the clear for a rejection thrown by the size setter.
   // That sentence is the whole reason this was hard to diagnose.

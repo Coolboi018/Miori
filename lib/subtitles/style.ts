@@ -8,7 +8,7 @@
 // for.
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// THE ONE RULE: THE DEFAULT IS THE OLD HARDCODED OVERLAY, CHARACTER FOR CHARACTER
+// THE ONE RULE: THE DEFAULTS ARE PINNED, AND EVERY MOVE IS DELIBERATE
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // `SubtitleOverlay.tsx` hardcoded `fontSize: 16`, `bottom: 48` and
@@ -17,10 +17,25 @@
 // settings is only safe if a user who touches NOTHING gets exactly what they
 // got before — otherwise the feature ships with a silent visual change attached
 // to it, and every "the subtitles look different" report has no cause anyone can
-// point at. So `'medium'` is 16pt, `'low'` is a lift of 0 and `'plate'` is the
-// same box. `check-subtitles.ts` asserts all four numbers.
+// point at. So `'plate'` is still the same box and `'default'` keeps its
+// placement.
+//
+// THE SIZE IS THE ONE DEFAULT THAT WAS MOVED ON PURPOSE: it is now `'big'`
+// (20pt), a step up from the 18pt this settled on before — 16/18pt is small on
+// a phone, and "make 20px the default" was the explicit ask. The rest of the
+// ladder is untouched, so anyone who wants it smaller still can. Every other
+// key in `DEFAULT_SUBTITLE_STYLE_KEYS` is byte-identical to the old overlay, and
+// `check-subtitles.ts` asserts the whole object.
 
-export type SubtitleSize = 'tiny' | 'small' | 'medium' | 'normal' | 'large' | 'xlarge' | 'huge';
+export type SubtitleSize =
+  | 'tiny'
+  | 'small'
+  | 'medium'
+  | 'normal'
+  | 'big'
+  | 'large'
+  | 'xlarge'
+  | 'huge';
 export type SubtitlePosition = 'custom' | 'default';
 export type SubtitleBackground = 'plate' | 'shadow' | 'plain';
 export type SubtitleColor =
@@ -43,6 +58,7 @@ export const SUBTITLE_TYPEGRAPHY: Record<SubtitleSize, { fontSize: number; lineH
   small: { fontSize: 14, lineHeight: 19 },
   medium: { fontSize: 16, lineHeight: 22 },
   normal: { fontSize: 18, lineHeight: 24 },
+  big: { fontSize: 20, lineHeight: 27 },
   large: { fontSize: 22, lineHeight: 29 },
   xlarge: { fontSize: 26, lineHeight: 34 },
   huge: { fontSize: 30, lineHeight: 39 },
@@ -177,7 +193,7 @@ export const DEFAULT_SUBTITLE_STYLE_KEYS: {
   background: SubtitleBackground;
   color: SubtitleColor;
 } = {
-  size: 'normal',
+  size: 'big',
   position: 'default',
   positionFrac: DEFAULT_POSITION_FRAC,
   background: 'plate',
@@ -227,10 +243,10 @@ export function resolveSubtitleStyle(opts: {
   background: SubtitleBackground | string | undefined;
   color: SubtitleColor | string | undefined;
 }): ResolvedSubtitleStyle {
-  // The annotations are load-bearing. `DEFAULT_SUBTITLE_STYLE_KEYS` is `as const`,
-  // so without them TypeScript infers each key as its DEFAULT LITERAL — `'medium'`,
-  // `'default'`, `0.96`, `'plate'`, `'white'` — and the whole rest of the function
-  // silently loses the other options of every union while still type-checking.
+  // The annotations are load-bearing. Without them TypeScript infers each key as
+  // `DEFAULT_SUBTITLE_STYLE_KEYS`'s literal — `'big'`, `'default'`, `0`,
+  // `'plate'`, `'white'` — and the whole rest of the function silently loses the
+  // other options of every union while still type-checking.
   const size: SubtitleSize = pick(SUBTITLE_TYPEGRAPHY, opts.size, DEFAULT_SUBTITLE_STYLE_KEYS.size);
   const position: SubtitlePosition = pick(
     { default: true, custom: true },

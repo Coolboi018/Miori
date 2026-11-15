@@ -19,7 +19,7 @@ import { ListSheetHost } from '@/components/ui/ListSheetHost';
 import { CharacterSheetHost } from '@/components/ui/CharacterSheetHost';
 import { UpdatePrompt } from '@/components/updates/UpdatePrompt';
 import { AUTO_CHECK_DELAY_MS, checkForUpdate } from '@/lib/updates/store';
-import { SPLASH } from '@/lib/ui/splash';
+import { SPLASH, handoffMs } from '@/lib/ui/splash';
 import { hydrateSettings } from '@/lib/settings/useSetting';
 import { readSetting, PLAYER_CACHES } from '@/lib/settings/store';
 import {
@@ -78,6 +78,22 @@ export const unstable_settings = {
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
 
+/**
+ * THE NATIVE SPLASH FADES OUT IN 200ms, NOT THE LIBRARY'S 400ms.
+ *
+ * `SplashScreenManager.kt` runs its own exit fade over `duration` while it is
+ * still composited ON TOP of the first React frame — so for that whole window
+ * the user is looking at a static logo with the animated one hidden underneath
+ * it. Cutting it to 200ms (the number lives in `lib/ui/splash.ts` with the rest
+ * of the timeline) is the difference between "the animation played behind a
+ * still picture" and "the animation played".
+ *
+ * Safe at module scope: `setOptions` is a plain synchronous module function on
+ * Android (an `AsyncFunction` on iOS is not involved), and on web it is a
+ * documented no-op.
+ */
+SplashScreen.setOptions({ duration: SPLASH.nativeExitMs });
+
 export default function RootLayout() {
   const [loaded, error] = useFonts({
     Montserrat_400Regular: require('../assets/fonts/Montserrat-Regular.ttf'),
@@ -92,9 +108,26 @@ export default function RootLayout() {
     if (error) throw error;
   }, [error]);
 
-  const [playerCacheReady, setPlayerCacheReady] = useState(false);
   /**
-   * CONFIGURE THE PERSISTENT VIDEO CACHE, ONCE, BEHIND THE SPLASH.
+   * THE LAUNCH GATE IS SETTINGS, AND ONLY SETTINGS.
+   *
+   * It used to be settings PLUS the whole video-cache setup below — two native
+   * calls, one of which (`clearVideoCacheAsync`) deletes files off the disk
+   * before the first screen was allowed to exist. That is launch time spent on
+   * something the USER CANNOT REACH YET: a `VideoPlayer` only exists in the
+   * watch route, which needs a navigation first. So the gate narrowed to the
+   * read the first frame genuinely depends on (`hydrateSettings`, one
+   * AsyncStorage-backed read, millisecond-scale), and the cache work now runs
+   * underneath the animated splash instead of in front of it.
+   *
+   * No new hazard from that: this effect still starts at mount, before any
+   * screen can mount, and those two calls have the whole splash plus whatever
+   * the user does next to finish. The failure mode if one did land late is
+   * unchanged and non-fatal — see below.
+   */
+  const [settingsReady, setSettingsReady] = useState(false);
+  /**
+   * CONFIGURE THE PERSISTENT VIDEO CACHE, ONCE, IN THE BACKGROUND.
    *
    * Both expo-video calls here carry the SAME hard precondition, verbatim from
    * the SDK 57 reference: *"This function can be called only if there are no
@@ -114,16 +147,18 @@ export default function RootLayout() {
    * making the call buys a second guaranteed rejection and a second misleading
    * warning to say nothing new.
    *
-   * Neither failure is fatal — `setPlayerCacheReady(true)` runs either way, so
-   * the app is never gated on the cache succeeding. The size is a PERSISTENT
-   * native value, so a failure leaves the previous limit standing rather than
-   * none, and the user's choice applies on the next launch.
+   * Neither failure is fatal — neither one gates the app, and the size is a
+   * PERSISTENT native value, so a failure leaves the previous limit standing
+   * rather than none and the user's choice applies on the next launch.
    */
   useEffect(() => {
     let mounted = true;
     void (async () => {
       await hydrateSettings();
-      // Load user-added extension repos (if any) behind the splash, so the
+      // Everything past this line is background work the splash does NOT wait
+      // on — the first frame is released here.
+      if (mounted) setSettingsReady(true);
+      // Load user-added extension repos (if any) while the splash is up, so the
       // registry is populated before the first screen mounts.
       // Cached manifests first (instant, offline-safe), then the update sweep.
       // The sweep waits EXTENSION_SYNC_DELAY_MS when there IS a cache, so it
@@ -168,7 +203,6 @@ export default function RootLayout() {
           }
         }
       }
-      if (mounted) setPlayerCacheReady(true);
     })();
     return () => { mounted = false; };
   }, []);
@@ -189,12 +223,6 @@ export default function RootLayout() {
     void refreshUserId();
   }, []);
 
-  useEffect(() => {
-    if (loaded && playerCacheReady) {
-      void SplashScreen.hideAsync();
-    }
-  }, [loaded, playerCacheReady]);
-
   /**
    * THE SPLASH STAYS UP UNTIL THE CACHE HAS BEEN READ BACK OFF DISK.
    *
@@ -211,6 +239,10 @@ export default function RootLayout() {
    * `PersistQueryClientProvider` blocks its children until restore completes, so
    * this gate is belt-and-braces for the case where restore is slow — it keeps
    * the splash up rather than flashing an unhydrated screen.
+   *
+   * The gate is `fontsReady && settingsReady` and nothing else: settings are the
+   * only read the first frame is built from (`hydrateSettings` above). The video
+   * cache is background work now — see the note there.
    */
   const [fontsReady, setFontsReady] = useState(false);
   const [animatedSplashVisible, setAnimatedSplashVisible] = useState(true);
@@ -218,6 +250,37 @@ export default function RootLayout() {
   useEffect(() => {
     if (loaded && !error) setFontsReady(true);
   }, [loaded, error]);
+
+  /**
+   * LET THE FIRST FRAME OUT, THEN TIME THE HAND-OFF TO THE IN-APP ENTRANCE.
+   *
+   * `hideAsync` only flips `keepSplashScreenOnScreen` to false — it resolves
+   * when the native exit fade STARTS, not when it ends (`SplashScreenManager.kt`
+   * runs `nativeExitMs` of alpha ramp afterwards, still drawn over the React
+   * tree). Mounting the animated logo immediately would therefore play part of
+   * its entrance behind a still picture, which is exactly how a real animation
+   * gets reported as "still". So the overlay is held back by `handoffMs` — the
+   * native fade's own duration plus a beat — and starts where the user can see
+   * it.
+   *
+   * Timed rather than awaited: `hideAsync`'s promise says nothing about when the
+   * fade finishes, and on web there is no native splash to wait for at all.
+   */
+  const [nativeSplashGone, setNativeSplashGone] = useState(Platform.OS === 'web');
+  useEffect(() => {
+    if (!fontsReady || !settingsReady || nativeSplashGone) return;
+    void SplashScreen.hideAsync();
+    const handoff = setTimeout(() => setNativeSplashGone(true), handoffMs());
+    return () => clearTimeout(handoff);
+  }, [fontsReady, settingsReady, nativeSplashGone]);
+
+  /**
+   * The overlay is only up once BOTH halves have happened: the native splash has
+   * finished fading, and the entrance has not yet torn itself down. Gating the
+   * watchdog and the render on one derived value keeps those two conditions from
+   * being spelled out (and drifted) in three places.
+   */
+  const splashOverlayUp = animatedSplashVisible && nativeSplashGone;
 
   /**
    * THE UPDATE CHECK — once per launch, and late.
@@ -248,10 +311,10 @@ export default function RootLayout() {
    * — `scripts/check-splash.ts` pins that relationship.
    */
   useEffect(() => {
-    if (!animatedSplashVisible) return;
+    if (!splashOverlayUp) return;
     const bail = setTimeout(() => setAnimatedSplashVisible(false), SPLASH.watchdogMs);
     return () => clearTimeout(bail);
-  }, [animatedSplashVisible]);
+  }, [splashOverlayUp]);
 
   useEffect(() => {
     if (!fontsReady || Platform.OS === 'web') return;
@@ -261,7 +324,7 @@ export default function RootLayout() {
     return () => clearTimeout(timer);
   }, [fontsReady]);
 
-  if (!fontsReady || !playerCacheReady) return null;
+  if (!fontsReady || !settingsReady) return null;
 
   return (
     <PersistQueryClientProvider
@@ -278,9 +341,7 @@ export default function RootLayout() {
       }}
     >
       <RootLayoutNav />
-      {animatedSplashVisible ? (
-        <AnimatedSplash onFinish={handleSplashFinish} />
-      ) : null}
+      {splashOverlayUp ? <AnimatedSplash onFinish={handleSplashFinish} /> : null}
     </PersistQueryClientProvider>
   );
 }

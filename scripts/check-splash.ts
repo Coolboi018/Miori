@@ -12,6 +12,14 @@
  *      delayed frame leaves a black rectangle over a working app — the actual
  *      "stuck" bug.
  *
+ * The follow-up report (15 Nov) was "it's just my logo, still". Motionless has
+ * two more causes, both pinned below and both invisible in a code review:
+ *
+ *   4. the entrance PLAYS WHERE IT CANNOT BE SEEN — behind the native splash's
+ *      own 400ms exit fade, or before the logo bitmap has finished decoding;
+ *   5. reduce motion, which Android also switches on for battery saver, used to
+ *      hold the logo at full opacity and "animate" it from 1 to 1.
+ *
  * Every rule below is a source-shape or constant assertion, and each one names
  * the shape that would get it wrong. Offline, no device, no network.
  *
@@ -21,13 +29,13 @@
 // Declared rather than imported from 'node:*': this project carries no
 // @types/node, and the other source-reading checks do exactly this.
 declare const require: (id: string) => {
-  readFileSync(path: string, encoding: 'utf8'): string;
+  readFileSync(path: string, encoding: 'utf8' | 'binary'): string;
 };
 const { readFileSync } = require('node:fs');
 
 declare const process: { cwd(): string; exit(code: number): never };
 
-import { SPLASH, splashTotalMs } from '../lib/ui/splash';
+import { SPLASH, handoffMs, splashTotalMs } from '../lib/ui/splash';
 
 let pass = 0;
 let fail = 0;
@@ -83,6 +91,11 @@ check('the old 1.9s hold is gone', SPLASH.holdMs < 1000, true);
 // followed. Both numbers below have to stay in "you can see it" territory.
 check('the logo fades in from below full opacity', SPLASH.fromOpacity < 1, true);
 check('the scale travel is at least 10%', 1 - SPLASH.fromScale >= 0.1, true);
+// The hand-off has to be a beat, not a second act of its own: it is time the
+// user spends watching the NATIVE splash before the in-app one is allowed to
+// move at all.
+check('the hand-off to the in-app entrance is a beat', handoffMs() < 400, true);
+check('the hand-off covers the native exit fade', handoffMs() > SPLASH.nativeExitMs, true);
 
 // ---------------------------------------------------------------------------
 section('the entrance is visible — and actually animates');
@@ -113,6 +126,42 @@ check('the scale is actually driven', /logoScale\.value = withTiming\(1/.test(sp
 // Reduce motion removes travel, never the transition itself — a completely
 // still frame is what a frozen app looks like.
 check('reduce-motion still cross-fades', /reducedFadeMs/.test(splashSrc), true);
+// ⚠️ THE "IT'S JUST A STILL LOGO" BUG, on the path a low-end phone actually
+// takes. `useSharedValue(reduced ? 1 : SPLASH.fromOpacity)` holds the logo at
+// FULL opacity under reduce motion, so the fade-in that follows is an animation
+// from 1 to 1. Reduce motion is on for battery saver as well as the
+// accessibility toggle, which is why this showed up on the weak device.
+check(
+  'reduce-motion fades in from the same place',
+  /logoOpacity = useSharedValue(?:<number>)?\(SPLASH\.fromOpacity\)/.test(splashSrc),
+  true
+);
+check(
+  'the full-opacity reduce-motion start would be rejected',
+  /logoOpacity = useSharedValue(?:<number>)?\(SPLASH\.fromOpacity\)/.test(
+    'const logoOpacity = useSharedValue(reduced ? 1 : SPLASH.fromOpacity);'
+  ),
+  false
+);
+// ⚠️ AND THE DECODE. The logo is a bundled bitmap decoded off the main thread,
+// so a timeline started on mount can be over before the first frame WITH a logo
+// in it is painted. The entrance arms on the image's own `onLoad` (or on the
+// fallback ceiling, so a hung decode cannot mute the splash).
+check(
+  'the entrance arms on the logo decode',
+  /onLoad=\{arm\}/.test(splashSrc) && /onError=\{arm\}/.test(splashSrc),
+  true
+);
+check(
+  'the entrance waits on the armed flag',
+  /if \(!armed\) return;/.test(splashSrc),
+  true
+);
+check(
+  'the decode wait has a shared ceiling',
+  /setTimeout\(arm, SPLASH\.decodeFallbackMs\)/.test(splashSrc),
+  true
+);
 // One cheap curve instead of a per-frame solver.
 check('no spring solver on the splash', /withSpring/.test(splashSrc), false);
 check('a cubic timing curve drives the logo', /withTiming/.test(splashSrc) && /Easing\.out/.test(splashSrc), true);
@@ -133,9 +182,34 @@ check(
 );
 check(
   'the watchdog is conditional on the overlay being up',
-  /if \(!animatedSplashVisible\) return;/.test(rootSrc),
+  /if \(!splashOverlayUp\) return;/.test(rootSrc),
   true
 );
+// ⚠️ THE HAND-OFF ORDER, which is the difference between an animation and a
+// still picture. `hideAsync()` resolves when the native exit fade STARTS and the
+// fade keeps drawing over the React tree for `nativeExitMs` after that, so a
+// tree mounted on it plays its entrance behind a static logo. The overlay waits
+// the fade out.
+check(
+  'the overlay waits for the native splash to clear',
+  /splashOverlayUp = animatedSplashVisible && nativeSplashGone/.test(rootSrc),
+  true
+);
+check(
+  'the hand-off is timed off the shared constants',
+  /setTimeout\(\(\) => setNativeSplashGone\(true\), handoffMs\(\)\)/.test(rootSrc),
+  true
+);
+check(
+  'the native exit fade is shortened from the library default',
+  /SplashScreen\.setOptions\(\{ duration: SPLASH\.nativeExitMs \}\)/.test(rootSrc),
+  true
+);
+// THE LAUNCH GATE, pinned because it is the startup win: fonts plus the one
+// settings read, with the native video-cache calls moved behind the first frame.
+// Re-widening it to the cache is a silent relaunch-cost regression.
+check('the launch gate is fonts and settings', /if \(!fontsReady \|\| !settingsReady\) return null;/.test(rootSrc), true);
+check('the launch gate no longer waits on the video cache', /playerCacheReady/.test(rootSrc), false);
 // The OLD shape, watched failing: a completion callback as the only teardown.
 check(
   'a callback-only teardown would be rejected',
@@ -171,6 +245,36 @@ const nativeBg = String(splashPlugin?.[1]?.backgroundColor ?? '').toLowerCase();
 const containerBg = /container:\s*\{[\s\S]*?backgroundColor:\s*'([^']+)'/.exec(splashSrc)?.[1]?.toLowerCase();
 // Any difference between these two is a flash at hand-off.
 check('native and in-app backgrounds match', nativeBg, containerBg);
+
+// ---------------------------------------------------------------------------
+section('the logo bitmap is sized for the box');
+// ---------------------------------------------------------------------------
+
+// ⚠️ THE LOW-END DECODE. The source was 1254×1254 / 770KB to fill a 168dp box —
+// roughly six times the pixels any screen asks for, and every one of them is
+// allocated and decoded before the first frame of the entrance can be painted.
+// On a weak device that is the splash's whole budget spent on pixels nobody
+// sees. The floor is the box at 4x (so nothing upscales on the densest panel),
+// the ceiling is 1024 (so a poster cannot come back).
+const logoPx = (() => {
+  // 'binary' on purpose: one char per byte, so both the IHDR dimensions and the
+  // file size below can be read off the same buffer.
+  const header = readFileSync(`${ROOT}/assets/images/splash-icon.png`, 'binary');
+  const be32 = (at: number) =>
+    ((header.charCodeAt(at) << 24) |
+      (header.charCodeAt(at + 1) << 16) |
+      (header.charCodeAt(at + 2) << 8) |
+      header.charCodeAt(at + 3)) >>>
+    0;
+  return { width: be32(16), height: be32(20), bytes: header.length };
+})();
+
+check('the logo source decodes to a square', logoPx.width, logoPx.height);
+check('the logo source covers the box at 4x', logoPx.width >= logoWidth * 4, true);
+check('the logo source is not a poster', logoPx.width <= 1024, true);
+// A loose ceiling, not a target: it catches a re-export at full resolution,
+// which is the shape this came back as once already.
+check('the logo file is not a megabyte', logoPx.bytes < 400 * 1024, true);
 
 // ---------------------------------------------------------------------------
 console.log(`\n${pass + fail} checks — ${pass} passed, ${fail} failed`);

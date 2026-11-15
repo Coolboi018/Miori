@@ -22,6 +22,12 @@
  * down when the destination already asserted (`lastSent` not watch), and
  * spares a queued BROWSE frame from the drop.
  *
+ * A third report (15 Nov): "every screen change removes the RPC and adds it
+ * back". Nothing on the wire clears — the card was being RE-CREATED because
+ * its identity moved (browsing sent type 0/'Miori', every other screen type 3
+ * with its own title as the name, and a fresh start timestamp per frame). The
+ * last scenario pins the identity and the browsing clock as constant.
+ *
  * Run with:  npx tsx scripts/check-presence.ts
  */
 
@@ -211,6 +217,39 @@ async function main() {
       'a queued browse frame survives the release',
       lastDetail() === 'Surviving Page',
       `last card is "${lastDetail()}" — the idle clobbered the queued browse frame`
+    );
+  }
+
+  console.log('\nthe card identity never moves (one card, updated in place)');
+  {
+    capture().length = 0;
+    const presence = await freshPresence();
+    await presence.setPresenceEnabled(true);
+    // Four different screens — home, two titled browsers, then the player.
+    await presence.updateBrowsing();
+    await sleep(450);
+    await presence.updateBrowsing('Searching anime');
+    await sleep(450);
+    await presence.updateBrowsing('Airing schedule');
+    await sleep(450);
+    await presence.updatePresence('Watched Show', 1);
+    await sleep(450);
+
+    const cards = capture().map((c) => c.activity);
+    check('every screen sent a frame', cards.length === 4, `sent ${cards.length}`);
+    const identity = cards.map((a) => `${a.name}|${a.type}`);
+    check(
+      'one name+type across every screen — changing it re-creates the card',
+      new Set(identity).size === 1,
+      identity.join('  ')
+    );
+    // The browsing card is ONE continuing activity, so its start must not be
+    // re-stamped per screen (a fresh start reads as a new activity to Discord).
+    const browseStarts = cards.filter((a) => a.details !== 'Watched Show').map((a) => a.startTimestamp);
+    check(
+      'the browsing card keeps one start timestamp',
+      new Set(browseStarts).size === 1,
+      browseStarts.join('  ')
     );
   }
 

@@ -246,6 +246,20 @@ export default function RootLayout() {
    */
   const [fontsReady, setFontsReady] = useState(false);
   const [animatedSplashVisible, setAnimatedSplashVisible] = useState(true);
+  /**
+   * THE APP TREE IS NOT MOUNTED UNTIL THE SPLASH ENTRANCE HAS FINISHED.
+   *
+   * This is the low-end half of the 15 Nov fix. Mounting home (~70 poster tiles)
+   * plus the cache restore is the single biggest lump of JS work at launch, and
+   * it used to land in the SAME window as the splash entrance — so the one asset
+   * that has to look smooth was competing with the screen it was covering.
+   *
+   * `AnimatedSplash` now fires `onEntered` when its entrance ends, and the hold
+   * that follows is a still frame: that is where the app's first render is paid
+   * for, with the exit fade still to come behind it.
+   */
+  const [appEntered, setAppEntered] = useState(false);
+  const handleSplashEntered = useCallback(() => setAppEntered(true), []);
   const handleSplashFinish = useCallback(() => setAnimatedSplashVisible(false), []);
   useEffect(() => {
     if (loaded && !error) setFontsReady(true);
@@ -257,11 +271,16 @@ export default function RootLayout() {
    * `hideAsync` only flips `keepSplashScreenOnScreen` to false — it resolves
    * when the native exit fade STARTS, not when it ends (`SplashScreenManager.kt`
    * runs `nativeExitMs` of alpha ramp afterwards, still drawn over the React
-   * tree). Mounting the animated logo immediately would therefore play part of
-   * its entrance behind a still picture, which is exactly how a real animation
-   * gets reported as "still". So the overlay is held back by `handoffMs` — the
-   * native fade's own duration plus a beat — and starts where the user can see
-   * it.
+   * tree). Starting the animated logo's timeline immediately would therefore
+   * play part of its entrance behind a still picture, which is exactly how a
+   * real animation gets reported as "still". So the TIMELINE waits out
+   * `handoffMs` — the native fade's own duration plus a beat.
+   *
+   * ⚠️ THE TIMELINE, NOT THE MOUNT. This used to hold the whole overlay back,
+   * which left the React tree uncovered for that window and made the app's first
+   * frame the HOME SCREEN — the "home, then the splash animation, then home"
+   * sequence. `nativeSplashGone` is now passed to `AnimatedSplash` as
+   * `handoffDone`; the overlay itself is up from the first frame.
    *
    * Timed rather than awaited: `hideAsync`'s promise says nothing about when the
    * fade finishes, and on web there is no native splash to wait for at all.
@@ -275,12 +294,17 @@ export default function RootLayout() {
   }, [fontsReady, settingsReady, nativeSplashGone]);
 
   /**
-   * The overlay is only up once BOTH halves have happened: the native splash has
-   * finished fading, and the entrance has not yet torn itself down. Gating the
-   * watchdog and the render on one derived value keeps those two conditions from
-   * being spelled out (and drifted) in three places.
+   * THE APP IS MOUNTED BEHIND THE OVERLAY, NOT IN FRONT OF IT.
+   *
+   * `!animatedSplashVisible` is the second half of this and it is not a
+   * formality: the watchdog (below) tears the overlay down without ever having
+   * fired `onEntered`, so a stalled entrance would otherwise leave the user on
+   * the overlay's black forever — the "stuck" bug in a new costume.
+   *
+   * The two halves are one expression on purpose: "the app may render" is
+   * exactly "the entrance finished OR there is nothing covering it any more".
    */
-  const splashOverlayUp = animatedSplashVisible && nativeSplashGone;
+  const showApp = appEntered || !animatedSplashVisible;
 
   /**
    * THE UPDATE CHECK — once per launch, and late.
@@ -311,10 +335,10 @@ export default function RootLayout() {
    * — `scripts/check-splash.ts` pins that relationship.
    */
   useEffect(() => {
-    if (!splashOverlayUp) return;
+    if (!animatedSplashVisible) return;
     const bail = setTimeout(() => setAnimatedSplashVisible(false), SPLASH.watchdogMs);
     return () => clearTimeout(bail);
-  }, [splashOverlayUp]);
+  }, [animatedSplashVisible]);
 
   useEffect(() => {
     if (!fontsReady || Platform.OS === 'web') return;
@@ -340,8 +364,14 @@ export default function RootLayout() {
         void startWarmup();
       }}
     >
-      <RootLayoutNav />
-      {splashOverlayUp ? <AnimatedSplash onFinish={handleSplashFinish} /> : null}
+      {showApp ? <RootLayoutNav /> : null}
+      {animatedSplashVisible ? (
+        <AnimatedSplash
+          handoffDone={nativeSplashGone}
+          onEntered={handleSplashEntered}
+          onFinish={handleSplashFinish}
+        />
+      ) : null}
     </PersistQueryClientProvider>
   );
 }

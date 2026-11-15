@@ -20,6 +20,11 @@
  *   5. reduce motion, which Android also switches on for battery saver, used to
  *      hold the logo at full opacity and "animate" it from 1 to 1.
  *
+ * And the third report (15 Nov, "home screen for a second, THEN the splash
+ * animation, THEN home") is the cover being late rather than the entrance being
+ * hidden: the overlay was mounted after the hand-off, so the app was on screen
+ * uncovered until it arrived. Mount and timeline are gated separately now.
+ *
  * Every rule below is a source-shape or constant assertion, and each one names
  * the shape that would get it wrong. Offline, no device, no network.
  *
@@ -149,17 +154,39 @@ check(
 // fallback ceiling, so a hung decode cannot mute the splash).
 check(
   'the entrance arms on the logo decode',
-  /onLoad=\{arm\}/.test(splashSrc) && /onError=\{arm\}/.test(splashSrc),
+  /onLoad=\{markDecoded\}/.test(splashSrc) && /onError=\{markDecoded\}/.test(splashSrc),
+  true
+);
+// ⚠️ BOTH HALVES. The decode is the reason the timeline cannot start on mount;
+// `handoffDone` is the reason it cannot start while the native splash is still
+// drawn over the tree. Either one missing puts the entrance where it cannot be
+// seen, which is the whole "it's just my logo, still" family of reports.
+check(
+  'the entrance waits on the decode AND the hand-off',
+  /if \(!handoffDone \|\| !decoded\) return;/.test(splashSrc),
   true
 );
 check(
-  'the entrance waits on the armed flag',
-  /if \(!armed\) return;/.test(splashSrc),
-  true
+  'the entrance would not start behind the native splash',
+  /if \(!handoffDone \|\| !decoded\) return;/.test('if (!decoded) return;'),
+  false
 );
 check(
   'the decode wait has a shared ceiling',
-  /setTimeout\(arm, SPLASH\.decodeFallbackMs\)/.test(splashSrc),
+  /setTimeout\(markDecoded, SPLASH\.decodeFallbackMs\)/.test(splashSrc),
+  true
+);
+// THE APP IS RELEASED WHEN THE ENTRANCE ENDS. The mount that follows is the
+// biggest single lump of launch work, and it is deliberately spent on the still
+// hold rather than on a moving frame.
+check(
+  'the app is released when the entrance completes',
+  /setTimeout\(onEntered, enterMs\)/.test(splashSrc),
+  true
+);
+check(
+  'the release is timed off the shared entrance constant',
+  /const enterMs = reduced \? SPLASH\.reducedFadeMs : SPLASH\.enterMs;/.test(splashSrc),
   true
 );
 // One cheap curve instead of a per-frame solver.
@@ -182,18 +209,46 @@ check(
 );
 check(
   'the watchdog is conditional on the overlay being up',
-  /if \(!splashOverlayUp\) return;/.test(rootSrc),
+  /if \(!animatedSplashVisible\) return;/.test(rootSrc),
   true
 );
-// ⚠️ THE HAND-OFF ORDER, which is the difference between an animation and a
-// still picture. `hideAsync()` resolves when the native exit fade STARTS and the
-// fade keeps drawing over the React tree for `nativeExitMs` after that, so a
-// tree mounted on it plays its entrance behind a static logo. The overlay waits
-// the fade out.
+// ⚠️ THE COVER-FIRST ORDER — the 15 Nov report, "it shows my home screen for a
+// second, then switches to the splash animation, then finally the home screen".
+// The overlay was mounted only AFTER the native hand-off, so for that whole
+// window the React tree was on screen with NOTHING over it and the first frame
+// the user saw was the app. Gating the MOUNT on the hand-off is the bug; gating
+// the TIMELINE on it is the fix.
 check(
-  'the overlay waits for the native splash to clear',
-  /splashOverlayUp = animatedSplashVisible && nativeSplashGone/.test(rootSrc),
+  'the overlay is mounted on the first frame, not after the hand-off',
+  /\{animatedSplashVisible \? \(/.test(rootSrc),
   true
+);
+check(
+  'mounting the overlay on the hand-off would be rejected',
+  /\{animatedSplashVisible \? \(/.test('{splashOverlayUp ? <AnimatedSplash onFinish={x} /> : null}'),
+  false
+);
+// The app tree waits for the entrance, so the launch's biggest render lands on
+// the still hold instead of competing with the animation.
+check(
+  'the app tree waits for the entrance to finish',
+  /const showApp = appEntered \|\| !animatedSplashVisible;/.test(rootSrc),
+  true
+);
+check(
+  'the app tree is rendered through that gate',
+  /\{showApp \? <RootLayoutNav \/> : null\}/.test(rootSrc),
+  true
+);
+// The watchdog tears the overlay down without `onEntered` ever firing, so the
+// app has to be released by the overlay's absence too — otherwise a stalled
+// entrance ends on the overlay's black with no way out.
+check(
+  'a stalled entrance still releases the app',
+  /const showApp = appEntered \|\| !animatedSplashVisible;/.test(
+    'const showApp = appEntered;'
+  ),
+  false
 );
 check(
   'the hand-off is timed off the shared constants',

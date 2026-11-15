@@ -12,7 +12,7 @@ import {
   type PresenceActivity,
 } from './gateway';
 import { resolveArt } from './art';
-import { DISCORD_APP_ID } from './config';
+import { ACTIVITY_TYPE, APP_NAME, DISCORD_APP_ID } from './config';
 import { readSetting } from '@/lib/settings/store';
 
 const TOKEN_KEY = 'miori_discord_token';
@@ -278,6 +278,18 @@ let lastSent:
   | { kind: 'watch' | 'browse'; ep: number; playing: boolean; settled: boolean; bucket: number }
   | null = null;
 
+/** One clock for the whole browsing card. A fresh `Date.now()` on every frame
+ * said "this is a NEW activity" to Discord, which is the other half of the
+ * re-create-the-card report: the browsing card is one continuing activity, so
+ * it keeps one start and the elapsed time reads as one sitting. Cleared when a
+ * watch frame lands (see `applyFrame`), so coming back from the player starts
+ * a fresh clock rather than inheriting the browsing one. */
+let browseStart = 0;
+function browseClock(): number {
+  if (!browseStart) browseStart = Date.now();
+  return browseStart;
+}
+
 async function applyFrame(f: Frame, seq: number): Promise<void> {
   if (!(await isPresenceEnabled())) return;
   const token = await getDiscordToken();
@@ -293,11 +305,11 @@ async function applyFrame(f: Frame, seq: number): Promise<void> {
     // card on top of the destination screen — the "back from the player, the
     // episode is on my profile again" report of 10 Nov.
     gatewayStart(token, {
-      name: 'Miori',
-      type: 0,
+      name: APP_NAME,
+      type: ACTIVITY_TYPE,
       details: 'Browsing Miori',
       state: 'Exploring anime',
-      startTimestamp: Date.now(),
+      startTimestamp: browseClock(),
       status: readSetting('presence.status') === 'auto' ? undefined : readSetting('presence.status'),
       ...(DISCORD_APP_ID ? { applicationId: DISCORD_APP_ID } : {}),
       sig: 'idle',
@@ -312,14 +324,14 @@ async function applyFrame(f: Frame, seq: number): Promise<void> {
     const media = f.media;
     const details = title ? title.slice(0, 100) : 'Browsing Miori';
     const frame = (largeImage?: string): PresenceActivity => ({
-      name: (title ?? 'Miori').slice(0, 100),
-      type: title ? 3 : 0,
+      name: APP_NAME,
+      type: ACTIVITY_TYPE,
       details,
       state: title ? 'Viewing details' : 'Exploring anime',
-      startTimestamp: Date.now(),
+      startTimestamp: browseClock(),
       status: readSetting('presence.status') === 'auto' ? undefined : readSetting('presence.status'),
       ...(DISCORD_APP_ID ? { applicationId: DISCORD_APP_ID } : {}),
-      ...(largeImage ? { largeImage, largeText: (title ?? 'Miori').slice(0, 100) } : {}),
+      ...(largeImage ? { largeImage, largeText: (title ?? APP_NAME).slice(0, 100) } : {}),
       ...(media ? { buttons: [{ label: 'View Anime', url: media.pageUrl }] } : {}),
       sig: `browse|${title ?? ''}`,
       tier: 'screen' as const,
@@ -331,6 +343,9 @@ async function applyFrame(f: Frame, seq: number): Promise<void> {
   }
 
   const { title, ep, media, playback } = f;
+  // The player owns the card now, so the next browse/idle frame starts a fresh
+  // browsing clock instead of inheriting one from before the episode.
+  browseStart = 0;
   const now = Date.now();
   const posMs = Math.max(0, Math.floor((playback?.positionSec ?? 0) * 1000));
   const durMs = Math.max(0, Math.floor((playback?.durationSec ?? 0) * 1000));
@@ -369,8 +384,8 @@ async function applyFrame(f: Frame, seq: number): Promise<void> {
           ? 'screen'
           : 'churn';
   const frame = (largeImage?: string): PresenceActivity => ({
-    name: title.slice(0, 100),
-    type: 3,
+    name: APP_NAME,
+    type: ACTIVITY_TYPE,
     details: title.slice(0, 100),
     state,
     startTimestamp: start,

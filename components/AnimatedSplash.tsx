@@ -12,13 +12,14 @@
 //
 // ⚠️ AND THE TIMELINE DOES NOT START UNTIL THE LOGO CAN BE PAINTED.
 //
-// Two different ways this splash has been "still", and the fixes are separate:
+// Three different ways this splash has been wrong, and the fixes are separate:
 //
 //   1. THE DECODE. The logo is a bundled bitmap decoded asynchronously, so a
 //      timeline started on mount can finish before the first frame containing
-//      the logo is painted — the user sees the end state immediately. `arm`
-//      waits for the image's own `onLoad` (with `SPLASH.decodeFallbackMs` as a
-//      ceiling, so a hung decode cannot mute the splash).
+//      the logo is painted — the user sees the end state immediately.
+//      `markDecoded` waits for the image's own `onLoad` (with
+//      `SPLASH.decodeFallbackMs` as a ceiling, so a hung decode cannot mute the
+//      splash).
 //
 //   2. REDUCE MOTION. `useReducedMotion()` is true on any device whose animator
 //      duration scale is 0 — which is battery saver, not just the accessibility
@@ -26,6 +27,23 @@
 //      to 1. An animation from 1 to 1 is a still frame. It now fades in from
 //      `SPLASH.fromOpacity` like the normal path and drops only the zoom, which
 //      is the part reduce-motion is actually about.
+//
+//   3. ✅ THE OVERLAY IS MOUNTED ON THE FIRST FRAME, BUT IT DOES NOT MOVE UNTIL
+//      THE NATIVE SPLASH IS GONE. These are two different things and the code
+//      used to conflate them: the overlay was mounted only AFTER the hand-off,
+//      to keep its entrance from playing behind the native splash — which meant
+//      the React tree was on screen WITHOUT a cover for that whole window, and
+//      the app's first frame was therefore the home screen. That is the
+//      "home, then the splash animation, then home" sequence (15 Nov report):
+//      the native splash faded to the live app, and the overlay arrived on a
+//      later JS timer, on top of it.
+//
+//      Now the overlay is up from the first frame and `handoffDone` (owned by
+//      the root layout) gates only the TIMELINE. The native splash fades to the
+//      overlay's black rather than to the app, and `onEntered` — fired once the
+//      entrance has finished — is what releases the app to mount underneath.
+//      The app's first render therefore lands on a still frame (the hold),
+//      instead of competing with the entrance.
 //
 // The rest is the low-end work from 14 Nov, kept:
 //   - `expo-image` instead of `Animated.Image` (RN's decoder takes the full
@@ -48,7 +66,24 @@ import Animated, {
 } from 'react-native-reanimated';
 import { SPLASH } from '@/lib/ui/splash';
 
-export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
+export function AnimatedSplash({
+  handoffDone,
+  onEntered,
+  onFinish,
+}: {
+  /**
+   * True once the native splash's exit fade has finished — see `handoffMs()`.
+   * Gates the TIMELINE only; the overlay itself is already covering the app.
+   */
+  handoffDone: boolean;
+  /**
+   * Fired when the entrance has finished, so the app underneath may mount. Any
+   * jank from that first render then lands on the still hold rather than on a
+   * moving frame.
+   */
+  onEntered: () => void;
+  onFinish: () => void;
+}) {
   const reduced = useReducedMotion();
   // Both paths start invisible — see (2) above; only the scale differs, and
   // reduce motion keeps it at 1 so there is no travel at all.
@@ -62,18 +97,18 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
   /**
    * Armed by the logo's decode, or by the fallback if the decode never reports.
    * A state flag rather than a ref: the timeline below has to run on a commit,
-   * and it is the effect's own dependency that starts it exactly once.
+   * and it is the effect's own dependencies that start it exactly once.
    */
-  const [armed, setArmed] = useState(false);
-  const arm = useCallback(() => setArmed(true), []);
+  const [decoded, setDecoded] = useState(false);
+  const markDecoded = useCallback(() => setDecoded(true), []);
 
   useEffect(() => {
-    const fallback = setTimeout(arm, SPLASH.decodeFallbackMs);
+    const fallback = setTimeout(markDecoded, SPLASH.decodeFallbackMs);
     return () => clearTimeout(fallback);
-  }, [arm]);
+  }, [markDecoded]);
 
   useEffect(() => {
-    if (!armed) return;
+    if (!handoffDone || !decoded) return;
 
     if (reduced) {
       // No zoom (that is the motion being asked for less of) but a real
@@ -96,6 +131,12 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
       });
     }
 
+    // THE APP IS RELEASED AS THE ENTRANCE ENDS, not when the overlay goes: the
+    // hold that follows is a still frame, so the app's first render costs
+    // nothing the user can see, and there is a full exit fade for it to land in.
+    const enterMs = reduced ? SPLASH.reducedFadeMs : SPLASH.enterMs;
+    const entered = setTimeout(onEntered, enterMs);
+
     const hold = reduced ? SPLASH.reducedHoldMs : SPLASH.holdMs;
     const exitMs = reduced ? SPLASH.reducedExitMs : SPLASH.exitMs;
     const timer = setTimeout(() => {
@@ -103,8 +144,11 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
         if (finished) runOnJS(onFinish)();
       });
     }, hold);
-    return () => clearTimeout(timer);
-  }, [armed, reduced, logoOpacity, logoScale, containerOpacity, onFinish]);
+    return () => {
+      clearTimeout(entered);
+      clearTimeout(timer);
+    };
+  }, [handoffDone, decoded, reduced, logoOpacity, logoScale, containerOpacity, onEntered, onFinish]);
 
   const logoStyle = useAnimatedStyle(() => ({
     opacity: logoOpacity.value,
@@ -133,8 +177,8 @@ export function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
           transition={0}
           // The timeline's real trigger. `onError` arms it too: a logo that
           // cannot be decoded must not take the whole splash down with it.
-          onLoad={arm}
-          onError={arm}
+          onLoad={markDecoded}
+          onError={markDecoded}
         />
       </Animated.View>
     </Animated.View>

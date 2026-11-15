@@ -3,6 +3,7 @@
 // mobile networks. Same API as before — discord.ts/modal are untouched.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { readSetting } from '@/lib/settings/store';
+import { ACTIVITY_TYPE, APP_NAME } from './config';
 
 export interface PresenceActivity {
   name: string;
@@ -382,8 +383,8 @@ export function gatewayAttach(token: string) {
   if (desired) gatewayStart(token, desired.activity);
   else {
     gatewayStart(token, {
-      name: 'Miori',
-      type: 0,
+      name: APP_NAME,
+      type: ACTIVITY_TYPE,
       details: 'Browsing Miori',
       state: 'Exploring anime',
       startTimestamp: Date.now(),

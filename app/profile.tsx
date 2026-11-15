@@ -235,17 +235,15 @@ export default function ProfileScreen() {
           </Pressable>
           <View style={[styles.heroContent, { paddingTop: insets.top + spacing.xl + spacing.lg }]}>
             <Animated.View style={[styles.avatarWrap, { transform: [{ scale: avatarScale }] }]}>
-              <View style={styles.avatarRing}>
-                {profile.avatar ? (
-                  <Image source={{ uri: profile.avatar }} style={styles.avatar} contentFit="cover" />
-                ) : (
-                  <View style={[styles.avatar, { backgroundColor: color.accent.muted, alignItems: 'center', justifyContent: 'center' }]}>
-                    <Text style={{ color: color.text.primary, fontSize: 36, fontFamily: font.bold }}>
-                      {profile.name.charAt(0).toUpperCase()}
-                    </Text>
-                  </View>
-                )}
-              </View>
+              {profile.avatar ? (
+                <Image source={{ uri: profile.avatar }} style={styles.avatar} contentFit="cover" />
+              ) : (
+                <View style={[styles.avatar, { backgroundColor: color.accent.muted, alignItems: 'center', justifyContent: 'center' }]}>
+                  <Text style={{ color: color.text.primary, fontSize: 28, fontFamily: font.bold }}>
+                    {profile.name.charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+              )}
             </Animated.View>
             <Text style={styles.name}>{profile.name}</Text>
             <Text style={styles.handle}>AniList profile</Text>
@@ -410,38 +408,22 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.45)',
     zIndex: 2,
   },
-  hero: { height: 300, position: 'relative' },
-  banner: { ...StyleSheet.absoluteFill },
-  heroOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.35)' },
+  hero: { height: 240, position: 'relative' },
+  banner: { ...StyleSheet.absoluteFill, opacity: 0.4 },
+  heroOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.55)' },
   heroFade: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: 160,
-    experimental_backgroundImage: 'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.85) 100%)',
+    height: 120,
+    experimental_backgroundImage: 'linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.9) 100%)',
   },
-  heroContent: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.lg, paddingBottom: spacing.xl, alignItems: 'center' },
-  avatarWrap: { marginBottom: spacing.sm },
-  avatarRing: {
-    width: 104,
-    height: 104,
-    borderRadius: 52,
-    padding: 3,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  avatar: { width: 96, height: 96, borderRadius: 48, overflow: 'hidden' },
-  name: { color: '#fff', fontSize: 28, fontFamily: font.bold, marginTop: spacing.sm, letterSpacing: -0.5, textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 6 },
-  handle: { color: 'rgba(255,255,255,0.75)', fontSize: 13, fontFamily: font.medium, marginTop: 4, letterSpacing: 0.3 },
+  heroContent: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, alignItems: 'center' },
+  avatarWrap: { marginBottom: spacing.xs },
+  avatar: { width: 80, height: 80, borderRadius: 40, borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.25)', overflow: 'hidden' },
+  name: { color: '#fff', fontSize: 24, fontFamily: font.bold, marginTop: spacing.sm, letterSpacing: -0.3 },
+  handle: { color: 'rgba(255,255,255,0.6)', fontSize: 12, fontFamily: font.medium, marginTop: 2, letterSpacing: 0.4, textTransform: 'uppercase' },
   statsCard: {
     flexDirection: 'row',
     marginHorizontal: spacing.lg,

@@ -17,6 +17,7 @@ import { AppIcon } from '@/components/ui/AppIcon';
 
 import { getToken } from '@/lib/anilist/auth';
 import { updateBrowsing } from '@/lib/presence/discord';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { openCharacterSheet } from '@/lib/anime/characterSheet';
 import {
   fetchProfile,
@@ -177,7 +178,7 @@ export default function ProfileScreen() {
             AniList account.
           </Text>
           <Pressable
-            onPress={() => router.push('/login')}
+            onPress={() => pushOnce('/login')}
             style={({ pressed }) => [
               styles.notLoggedInBtn,
               { backgroundColor: color.accent.base, opacity: pressed ? 0.85 : 1 },
@@ -191,7 +192,7 @@ export default function ProfileScreen() {
             </Text>
           </Pressable>
           <Pressable
-            onPress={() => router.push('/settings/accounts')}
+            onPress={() => pushOnce('/settings/accounts')}
             style={({ pressed }) => [styles.notLoggedInSecondary, { opacity: pressed ? 0.6 : 1 }]}
             accessibilityRole="button"
             accessibilityLabel="Open accounts settings"

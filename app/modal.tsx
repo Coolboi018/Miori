@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { font } from '@/lib/ui/tokens';
 import { ActivityIndicator, Button, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import {
   ANILIST_CLIENT_ID,
   buildAuthUrl,
@@ -33,7 +34,7 @@ export default function AccountScreen() {
   const [duser, setDuser] = useState<DiscordUser | null>(null);
   const [presenceOn, setPresenceOn] = useState(false);
   const [gw, setGw] = useState<GatewayStatus | null>(null);
-  const router = useRouter();
+
 
   /**
    * The shared entry, not a fetch of its own.
@@ -148,7 +149,7 @@ export default function AccountScreen() {
         <View style={styles.card}>
           <Text style={styles.hint}>Login with AniList to sync episode progress.</Text>
           <View style={styles.gap} />
-          <Button title="Login inside the app" onPress={() => router.push('/login')} />
+          <Button title="Login inside the app" onPress={() => pushOnce('/login')} />
         </View>
       )}
       {!!error && <Text style={styles.error}>{error}</Text>}
@@ -184,7 +185,7 @@ export default function AccountScreen() {
         <View style={styles.card}>
           <Text style={styles.hint}>Login with Discord to show what you&apos;re watching.</Text>
           <View style={styles.gap} />
-          <Button title="Login with Discord" onPress={() => router.push('/discord-login')} />
+          <Button title="Login with Discord" onPress={() => pushOnce('/discord-login')} />
         </View>
       )}
       {!viewer && (

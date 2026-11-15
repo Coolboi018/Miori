@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { font, spacing } from '@/lib/ui/tokens';
 import { Text, View } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { useTheme } from '@/lib/ui/useTheme';
 import { SettingRow, SettingSection, SettingSwitch, SettingSegments } from '@/components/ui/settings';
 import { SettingsPage } from '@/components/settings/SettingsPage';
@@ -24,7 +25,7 @@ import {
 
 export default function AccountsSettings() {
   const { color } = useTheme();
-  const router = useRouter();
+
   const [duser, setDuser] = useState<DiscordUser | null>(null);
   const [presenceOn, setPresenceOn] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -112,7 +113,7 @@ export default function AccountsSettings() {
           ) : (
             <Text
               style={{ color: color.accent.base, fontSize: 15, fontFamily: font.semibold }}
-              onPress={() => router.push('/login')}
+              onPress={() => pushOnce('/login')}
               accessibilityRole="button"
             >
               Log in
@@ -149,7 +150,7 @@ export default function AccountsSettings() {
           ) : (
             <Text
               style={{ color: color.accent.base, fontSize: 15, fontFamily: font.semibold }}
-              onPress={() => router.push('/discord-login')}
+              onPress={() => pushOnce('/discord-login')}
               accessibilityRole="button"
             >
               Log in
@@ -205,7 +206,7 @@ export default function AccountsSettings() {
                   setDuser(null);
                   setPresenceOn(false);
                   setMsg(null);
-                  router.push('/discord-login?fresh=1');
+                  pushOnce('/discord-login', { fresh: '1' });
                 }}
                 accessibilityRole="button"
               >

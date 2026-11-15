@@ -6,6 +6,7 @@
 
 import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -107,7 +108,7 @@ export default function SettingsIndex() {
       else void checkForUpdate();
       return;
     }
-    router.push(`/settings/${cat.key}` as never);
+    pushOnce(`/settings/${cat.key}`);
   };
 
   // The shared entry, not a fetch of its own. Three screens were each calling
@@ -151,7 +152,7 @@ export default function SettingsIndex() {
       <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + spacing.giant }}>
         {/* Profile card — the Apple-ID row at the top of iOS settings. */}
         <Pressable
-          onPress={() => router.push('/settings/accounts')}
+          onPress={() => pushOnce('/settings/accounts')}
           accessibilityRole="button"
           accessibilityLabel="Open accounts"
           style={({ pressed }) => [

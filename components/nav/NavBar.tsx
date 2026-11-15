@@ -21,6 +21,7 @@
 
 import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { memo, useCallback, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -85,9 +86,9 @@ export const NavBar = memo(function NavBar({
   const go = useCallback(
     (path: string, fn?: () => void) => () => {
       if (fn) return fn();
-      router.push(path as never);
+      pushOnce(path);
     },
-    [router]
+    []
   );
 
   /**

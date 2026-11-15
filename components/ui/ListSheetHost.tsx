@@ -11,7 +11,7 @@
 // must not fire a 401 per press.
 
 import { useCallback, useSyncExternalStore } from 'react';
-import { useRouter } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { useUserId } from '@/lib/auth/session';
 import { useListEntry, useSaveListEntry, type EntryDraft } from '@/lib/query/listEntries';
 import {
@@ -23,7 +23,7 @@ import { ListEntrySheet } from './ListEntrySheet';
 import { SignInGate } from './SignInGate';
 
 export function ListSheetHost() {
-  const router = useRouter();
+
   const target = useSyncExternalStore(
     subscribeListSheet,
     getListSheetTarget,
@@ -61,8 +61,8 @@ export function ListSheetHost() {
     // the login route until the target clears — which it would not, because
     // nothing dismisses it on a push.
     closeListSheet();
-    router.push('/login');
-  }, [router]);
+    pushOnce('/login');
+  }, []);
 
   /**
    * The entry query is keyed on the TARGET's id, and disabled when there is no

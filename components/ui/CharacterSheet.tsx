@@ -68,7 +68,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Image } from 'expo-image';
-import { openAnime } from '@/lib/nav/pushOnce';
+import { openAnime, pushOnce } from '@/lib/nav/pushOnce';
 import {
   Modal,
   PanResponder,
@@ -89,7 +89,7 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { useRouter } from 'expo-router';
+
 import { useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/ui/useTheme';
@@ -136,7 +136,6 @@ export function CharacterSheet({
 }) {
   const { color } = useTheme();
   const insets = useSafeAreaInsets();
-  const router = useRouter();
   const progress = useSharedValue(0);
   const dragY = useSharedValue(0);
   const sheetHeight = useSharedValue(600);
@@ -211,8 +210,8 @@ export function CharacterSheet({
   const goSignIn = useCallback(() => {
     setGateOpen(false);
     onClose();
-    router.push('/login');
-  }, [onClose, router]);
+    pushOnce('/login');
+  }, [onClose]);
 
   useEffect(() => {
     if (visible) {

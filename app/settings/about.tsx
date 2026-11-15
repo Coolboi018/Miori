@@ -1,6 +1,6 @@
 import { Text } from 'react-native';
 import { font } from '@/lib/ui/tokens';
-import { useRouter } from 'expo-router';
+import { pushOnce } from '@/lib/nav/pushOnce';
 import { useTheme } from '@/lib/ui/useTheme';
 import { resetSettings } from '@/lib/settings/useSetting';
 import { SettingRow, SettingSection } from '@/components/ui/settings';
@@ -16,7 +16,7 @@ import { useUpdateState } from '@/lib/updates/useUpdate';
 
 export default function AboutSettings() {
   const { color } = useTheme();
-  const router = useRouter();
+
   const update = useUpdateState();
 
   const onPressUpdate = () => {
@@ -41,7 +41,7 @@ export default function AboutSettings() {
         <SettingRow label="Diagnostics" hint="Legacy account + socket debug page.">
           <Text
             style={{ color: color.accent.base, fontSize: 15, fontFamily: font.semibold }}
-            onPress={() => router.push('/modal')}
+            onPress={() => pushOnce('/modal')}
             accessibilityRole="button"
           >
             Open

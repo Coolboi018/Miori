@@ -26,7 +26,7 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { font, radii, spacing } from '@/lib/ui/tokens';
-import { openAnime } from '@/lib/nav/pushOnce';
+import { openAnime, pushOnce } from '@/lib/nav/pushOnce';
 import {
   ActivityIndicator,
   FlatList,
@@ -344,7 +344,7 @@ export default function HomeScreen() {
             items={continueItems}
             onSelect={open}
             tileStyle={tileStyle}
-            onSeeAll={() => router.push({ pathname: '/profile', params: { tab: 'CURRENT' } })}
+            onSeeAll={() => pushOnce('/profile', { tab: 'CURRENT' })}
           />
         ),
       });
@@ -358,7 +358,7 @@ export default function HomeScreen() {
             items={planning}
             onSelect={open}
             variant={tileStyle}
-            onSeeAll={() => router.push({ pathname: '/profile', params: { tab: 'PLANNING' } })}
+            onSeeAll={() => pushOnce('/profile', { tab: 'PLANNING' })}
           />
         ),
       });
@@ -440,7 +440,6 @@ export default function HomeScreen() {
   }, [
     hero,
     open,
-    router,
     seeAll,
     showContinue,
     showPlanning,

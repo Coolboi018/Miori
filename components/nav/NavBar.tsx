@@ -20,7 +20,7 @@
 // square highlight on a round button.
 
 import { Image } from 'expo-image';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { pushOnce } from '@/lib/nav/pushOnce';
 import { memo, useCallback, useState } from 'react';
 import { Alert, StyleSheet, Text, View } from 'react-native';
@@ -78,7 +78,6 @@ export const NavBar = memo(function NavBar({
   isSearchTab = false,
 }: NavBarProps) {
   const insets = useSafeAreaInsets();
-  const router = useRouter();
   const { color } = useTheme();
   const { viewer } = useViewer();
   const resolvedAvatar = avatarUrl ?? viewer?.avatar?.large ?? viewer?.avatar?.medium ?? null;
@@ -134,9 +133,11 @@ export const NavBar = memo(function NavBar({
   const commitSearch = useCallback(
     (q: string) => {
       setExpanded(false);
-      router.push({ pathname: '/(tabs)/search', params: { q } });
+      // Guarded — see `lib/nav/pushOnce.ts`. Submitting the omnibox is a tap on
+      // a focused control, which is where a second delivery lands.
+      pushOnce('/(tabs)/search', { q });
     },
-    [router]
+    []
   );
 
   /**

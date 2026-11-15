@@ -63,6 +63,20 @@ import {
 } from './Chrome';
 import { EpisodePanel, type PanelEpisode } from './EpisodePanel';
 import { GestureSurface } from './GestureSurface';
+import {
+  clampUnit,
+  sideForKind,
+  sidesFor,
+  type SwipeKind,
+  type SwipeSide,
+} from './verticalSwipe';
+import {
+  beginBrightnessSession,
+  endBrightnessSession,
+  readBrightness,
+  setBrightness,
+} from '@/lib/player/brightness';
+import { scheduleSideHudHide, showSideHud } from '@/lib/player/sideHud';
 import { SettingsPanel } from './SettingsPanel';
 import { type MenuRow } from './Menu';
 import { AppIcon } from '@/components/ui/AppIcon';
@@ -566,6 +580,14 @@ export default function LandscapePlayer() {
   const subsBackground = useSetting('subs.background');
   const subsColor = useSetting('subs.color');
   const subsDelayMs = useSetting('subs.delayMs');
+  /**
+   * Which half of the screen drives volume and which drives brightness — see
+   * `PLAYER_SWIPE_SIDES`. Mapped to the gesture's shape here (once per change)
+   * rather than passed as the raw key, so the surface never has to know what a
+   * setting is.
+   */
+  const swipeSideSetting = useSetting('player.swipeSides');
+  const swipeSides = useMemo(() => sidesFor(swipeSideSetting), [swipeSideSetting]);
 
   /**
    * One resolved object for the overlay, so the offset arithmetic exists once.
@@ -2788,11 +2810,105 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   }, [pokeControls]);
 
   const onMute = useCallback(() => {
-    setMuted((m) => {
-      player.muted = !m;
-      return !m;
+    setMuted((wasMuted) => {
+      // UNMUTING AT 0% WOULD BE SILENT. The volume swipe below can leave the
+      // player at zero, and a mute button that appears to do nothing is a bug
+      // report. Coming out of mute at silence restores the last audible level
+      // (never below 20%), and says so through the same HUD the swipe uses.
+      // `volumeRef` / `lastAudibleRef` are declared below; a closure may read
+      // them, and by the time a tap can arrive they exist.
+      if (wasMuted && volumeRef.current === 0) {
+        const restored = Math.max(0.2, lastAudibleRef.current);
+        volumeRef.current = restored;
+        player.volume = restored;
+        showSideHud('volume', restored, sideForKind(swipeSides, 'volume'));
+        scheduleSideHudHide();
+      }
+      player.muted = !wasMuted;
+      return !wasMuted;
     });
+    // `swipeSides` decides which edge the restored-volume readout draws on.
+  }, [player, swipeSides]);
+
+  // -------------------------------------------------------------------------
+  // Vertical swipe — volume (one half) and brightness (the other)
+  // -------------------------------------------------------------------------
+  /**
+   * THE TWO VALUES LIVE IN REFS, NOT STATE, and that is the whole performance
+   * decision.
+   *
+   * A drag emits a value every frame. In `useState` that would re-render this
+   * entire screen — chrome, timeline, subtitles, episode panel — sixty times a
+   * second for a number only the HUD shows. So the engine gets the value
+   * directly, and `lib/player/sideHud.ts` hands it to the one component that
+   * displays it. Nothing else on this screen moves while a finger drags.
+   */
+  const volumeRef = useRef(1);
+  /**
+   * The last level that was actually audible — what unmuting at 0% restores.
+   * Kept here rather than in the mute handler so a mute/unmute cycle never needs
+   * its own memory of the volume.
+   */
+  const lastAudibleRef = useRef(1);
+  /** Where the current drag started — set on start, cleared on end. */
+  const swipeBaseRef = useRef<{
+    kind: SwipeKind;
+    side: SwipeSide;
+    base: number;
+  } | null>(null);
+
+  /**
+   * ONE BASELINE PER SESSION, AND IT IS GIVEN BACK ON THE WAY OUT.
+   *
+   * The brightness the player sets is the app/window brightness, and on iOS it
+   * outlives the screen — so leaving without restoring would hand the user a dim
+   * phone. `beginBrightnessSession` reads what to return to; the cleanup below
+   * puts it back for every exit path (back, auto-advance replace, a crash in a
+   * child) because it is an effect cleanup rather than a button handler.
+   */
+  useEffect(() => {
+    player.volume = volumeRef.current;
+    void beginBrightnessSession();
+    return () => {
+      void endBrightnessSession();
+    };
   }, [player]);
+
+  const onVerticalStart = useCallback((kind: SwipeKind, side: SwipeSide) => {
+    const base = kind === 'volume' ? volumeRef.current : readBrightness();
+    swipeBaseRef.current = { kind, side, base };
+    showSideHud(kind, base, side);
+  }, []);
+
+  const onVerticalMove = useCallback(
+    (fraction: number) => {
+      const swipe = swipeBaseRef.current;
+      if (!swipe) return;
+      const value = clampUnit(swipe.base + fraction);
+      if (swipe.kind === 'volume') {
+        volumeRef.current = value;
+        if (value > 0) lastAudibleRef.current = value;
+        // Raising the volume out of a mute has to unmute: the engine stays muted
+        // at any volume, so without this the gesture reads as doing nothing.
+        if (value > 0 && player.muted) {
+          player.muted = false;
+          setMuted(false);
+        }
+        player.volume = value;
+      } else {
+        // Throttled and trailing inside the module — a per-frame native write is
+        // a window-attribute change on Android.
+        setBrightness(value);
+      }
+      showSideHud(swipe.kind, value, swipe.side);
+    },
+    [player]
+  );
+
+  const onVerticalEnd = useCallback(() => {
+    swipeBaseRef.current = null;
+    scheduleSideHudHide();
+  }, []);
 
   /**
    * EVERY SEEK WE ISSUE GETS A GRACE PERIOD.
@@ -3295,6 +3411,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // exists to avoid. `locked` is handled inside the handlers instead.
         enabled={!menu && !panelOpen}
         locked={locked}
+        swipeSides={swipeSides}
         boostRate={boostRate}
         handlers={{
           // Note: a SIDE single tap arrives only after the double-tap window
@@ -3322,6 +3439,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           onHoldStart,
           onHoldMove,
           onHoldEnd,
+          onVerticalStart,
+          onVerticalMove,
+          onVerticalEnd,
         }}
       />
 

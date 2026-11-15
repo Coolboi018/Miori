@@ -1,5 +1,5 @@
 import { useFonts } from 'expo-font';
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useNavigationContainerRef } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useState } from 'react';
 import { AppState, Platform } from 'react-native';
@@ -20,6 +20,8 @@ import { CharacterSheetHost } from '@/components/ui/CharacterSheetHost';
 import { UpdatePrompt } from '@/components/updates/UpdatePrompt';
 import { AUTO_CHECK_DELAY_MS, checkForUpdate } from '@/lib/updates/store';
 import { SPLASH, handoffMs } from '@/lib/ui/splash';
+import { bindNavigationRef } from '@/lib/nav/pushOnce';
+import { RouteProgress } from '@/components/nav/RouteProgress';
 import { hydrateSettings } from '@/lib/settings/useSetting';
 import { readSetting, PLAYER_CACHES } from '@/lib/settings/store';
 import {
@@ -423,6 +425,20 @@ function RootLayoutNav() {
   const colorScheme = useColorScheme();
   useForegroundRefresh();
 
+  /**
+   * HAND THE NAVIGATION GUARD THE LIVE CONTAINER.
+   *
+   * `lib/nav/pushOnce.ts` drops a push when the destination is already the
+   * focused screen, and it has to ask the navigator that question at push time
+   * — a copy cached from a render is one commit behind exactly when a tap burst
+   * is happening. This is the one component that is guaranteed to mount once,
+   * inside the container, for the whole app.
+   */
+  const navigationRef = useNavigationContainerRef();
+  useEffect(() => {
+    bindNavigationRef(navigationRef);
+  }, [navigationRef]);
+
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <StatusBar style="light" />
@@ -556,6 +572,11 @@ function RootLayoutNav() {
         <Stack.Screen name="login" options={{ title: 'AniList login', headerShown: false }} />
         <Stack.Screen name="discord-login" options={{ title: 'Discord login', headerShown: false }} />
       </Stack>
+      {/* "A screen is on its way." One host for the whole app, above the Stack
+          so it survives the screen change it is reporting on — and drawn on
+          the UI thread, so it keeps moving while the JS thread commits the
+          destination. See `lib/nav/pending.ts`. */}
+      <RouteProgress />
       {/* The update card, ONCE, for the whole app: the launch check and the
           Settings → About row open this same host rather than each rendering a
           modal. Above the Stack because it is a Modal — it has to survive a

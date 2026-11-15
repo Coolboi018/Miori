@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/ui/useTheme';
 import { font, radii, spacing } from '@/lib/ui/tokens';
 import { AppIcon, type AppIconName } from '@/components/ui/AppIcon';
+import { BackPlate } from '@/components/settings/BackPlate';
 import { useViewer } from '@/lib/auth/queries';
 import { getDiscordToken, fetchDiscordUser, type DiscordUser, updateBrowsing } from '@/lib/presence/discord';
 import { checkForUpdate, openUpdatePrompt } from '@/lib/updates/store';
@@ -143,9 +144,7 @@ export default function SettingsIndex() {
   return (
     <View style={[styles.container, { backgroundColor: color.bg.primary }]}>
       <View style={[styles.header, { paddingTop: insets.top + spacing.lg }]}>
-        <Text style={[styles.back, { color: color.accent.base }]} onPress={() => router.back()}>
-          ‹ Back
-        </Text>
+        <BackPlate label="Back to home" onPress={() => router.back()} />
         <Text style={[styles.title, { color: color.text.primary }]}>Settings</Text>
       </View>
 
@@ -241,7 +240,6 @@ export default function SettingsIndex() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   header: { paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
-  back: { fontSize: 15, fontFamily: font.medium },
   title: { fontSize: 30, fontFamily: font.bold, marginTop: spacing.xs },
   profile: {
     flexDirection: 'row',

@@ -54,6 +54,7 @@ import SlidersHorizontal from 'lucide-react-native/icons/sliders-horizontal';
 import ArrowUpDown from 'lucide-react-native/icons/arrow-up-down';
 import CalendarRange from 'lucide-react-native/icons/calendar-range';
 import Gauge from 'lucide-react-native/icons/gauge';
+import SunMedium from 'lucide-react-native/icons/sun-medium';
 import TrendingUp from 'lucide-react-native/icons/trending-up';
 import Flame from 'lucide-react-native/icons/flame';
 import Award from 'lucide-react-native/icons/award';
@@ -199,6 +200,12 @@ const ICONS = {
   volumeOn: Volume2,
   /** Muted. */
   volumeOff: VolumeX,
+  /**
+   * Screen brightness — the readout for the player's vertical swipe. `SunMedium`
+   * rather than `Sun`: at 22pt on a dark pill the plain sun's rays crowd into a
+   * blob, and the medium glyph is the one that reads as "brightness" at a glance.
+   */
+  brightness: SunMedium,
   /** "Fit / Fill / Stretch" cycle. */
   expand: Maximize2,
   /** Playback failure state. */

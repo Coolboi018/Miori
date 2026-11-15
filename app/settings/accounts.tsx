@@ -4,7 +4,7 @@ import { Text, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { pushOnce } from '@/lib/nav/pushOnce';
 import { useTheme } from '@/lib/ui/useTheme';
-import { SettingRow, SettingSection, SettingSwitch, SettingSegments } from '@/components/ui/settings';
+import { SettingRow, SettingSection, SettingSegments } from '@/components/ui/settings';
 import { SettingsPage } from '@/components/settings/SettingsPage';
 import { completeSignOut } from '@/lib/auth/actions';
 import { useSetting, useSetSetting } from '@/lib/settings/useSetting';
@@ -159,16 +159,22 @@ export default function AccountsSettings() {
         </SettingRow>
         {duser ? (
           <>
-            <SettingRow label="Rich presence" hint="Update Discord while watching.">
-              <SettingSwitch
-                value={presenceOn}
-                onValueChange={async (on) => {
+            <SettingRow
+              label="Rich presence"
+              hint="Update Discord while watching."
+              // The ROW owns the switch, so the whole tile toggles — see
+              // `components/ui/settings.tsx`.
+              toggle={{
+                value: presenceOn,
+                onChange: (on) => {
                   setPresenceOn(on);
-                  await setPresenceEnabled(on);
-                  if (!on) await clearPresence(true);
-                }}
-              />
-            </SettingRow>
+                  void (async () => {
+                    await setPresenceEnabled(on);
+                    if (!on) await clearPresence(true);
+                  })();
+                },
+              }}
+            />
             <SettingRow label="Status" hint="Overrides your whole Discord account while connected.">
               <SettingSegments
                 value={presenceStatus}

@@ -189,6 +189,24 @@ export const PLAYER_CACHES = [
 export type PlayerCacheKey = (typeof PLAYER_CACHES)[number]['key'];
 
 /**
+ * Which half of the player does what on a VERTICAL swipe.
+ *
+ * Two keys, not four: the gesture is a pair of halves, and "both the same" is not
+ * a thing anyone asked for. Brightness-left is the default because it is the
+ * convention on every phone player that has this gesture (YouTube, MX Player,
+ * VLC) — see `verticalSwipe.ts` for the mapping and why the default is spelled
+ * out there rather than inferred from registry order.
+ *
+ * The labels name the ORDER (left · right), because a setting called "swap" that
+ * shows two identical-looking rows is the thing people get wrong.
+ */
+export const PLAYER_SWIPE_SIDES = [
+  { key: 'brightness-left', label: 'Brightness · Volume', hint: 'Slide the left half to dim, the right half for volume (default)' },
+  { key: 'volume-left', label: 'Volume · Brightness', hint: 'Slide the left half for volume, the right half to dim' },
+] as const;
+export type PlayerSwipeSidesKey = (typeof PLAYER_SWIPE_SIDES)[number]['key'];
+
+/**
  * The default-quality choices, in display order. These are HLS variant LABELS
  * as `listVariants` builds them (`${height}p`), not a closed union of the
  * stored value — the stored value stays a free string so a provider that
@@ -433,6 +451,11 @@ interface SettingsSchema {
   /** Persistent Android video cache budget; session data is cleared on exit. */
   'player.cache': PlayerCacheKey;
   /**
+   * Which half of the player drives volume and which drives brightness on a
+   * vertical swipe. See PLAYER_SWIPE_SIDES.
+   */
+  'player.swipeSides': PlayerSwipeSidesKey;
+  /**
    * Which extension the player should START on when it resolves an episode,
    * stored as the extension id ('filmu', 'mega', 'anikoto', 'zoko', or a
    * user-installed one). `'auto'` — the default — means no global preference:
@@ -589,6 +612,7 @@ export const DEFAULTS: SettingsSchema = {
   'player.autoSkipIntro': true,
   'player.autoSkipOutro': false,
   'player.cache': 'balanced',
+  'player.swipeSides': 'brightness-left',
   'player.defaultSource': 'mega',
   'player.defaultQuality': 'auto',
   'player.hiddenControls': '[]',
@@ -708,6 +732,9 @@ export function isKnownValue(key: SettingKey, value: unknown): boolean {
   }
   if (key === 'player.cache') {
     return PLAYER_CACHES.some((b) => b.key === value);
+  }
+  if (key === 'player.swipeSides') {
+    return PLAYER_SWIPE_SIDES.some((s) => s.key === value);
   }
   if (key === 'player.defaultSource' || key === 'player.defaultQuality') {
     // Free-form on purpose — the source is whatever extension id the picker

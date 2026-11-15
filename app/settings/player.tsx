@@ -29,6 +29,7 @@ import {
   PLAYER_BUFFERS,
   PLAYER_CACHES,
   PLAYER_DEFAULT_QUALITIES,
+  PLAYER_SWIPE_SIDES,
   PLAYER_TRIGGER_IDS,
   type PlayerBufferKey,
   type PlayerCacheKey,
@@ -58,6 +59,7 @@ export default function PlayerSettings() {
   const defaultSource = useSetting('player.defaultSource');
   const defaultQuality = useSetting('player.defaultQuality');
   const hiddenControls = useSetting('player.hiddenControls');
+  const swipeSides = useSetting('player.swipeSides');
 
   /** The hidden chip ids, parsed — the store's validator guarantees the shape. */
   const hiddenIds = useMemo(() => {
@@ -99,43 +101,17 @@ export default function PlayerSettings() {
         <SettingRow
           label="Auto"
           hint="Remember where you watched each anime and start there (default)"
-        >
-          <Pressable
-            accessibilityRole="radio"
-            accessibilityState={{ selected: defaultSource === 'auto' }}
-            onPress={() => setSetting('player.defaultSource', 'auto')}
-            hitSlop={8}
-            style={styles.pick}
-          >
-            <Text
-              style={[
-                styles.pickText,
-                { color: defaultSource === 'auto' ? color.accent.base : color.text.muted },
-              ]}
-            >
-              {defaultSource === 'auto' ? 'On' : 'Use'}
-            </Text>
-          </Pressable>
-        </SettingRow>
+          selected={defaultSource === 'auto'}
+          onSelect={() => setSetting('player.defaultSource', 'auto')}
+        />
         {sourceOptions.map((s) => (
-          <SettingRow key={s.id} label={s.label} hint={`Start every episode on ${s.label} when it has one`}>
-            <Pressable
-              accessibilityRole="radio"
-              accessibilityState={{ selected: defaultSource === s.id }}
-              onPress={() => setSetting('player.defaultSource', s.id)}
-              hitSlop={8}
-              style={styles.pick}
-            >
-              <Text
-                style={[
-                  styles.pickText,
-                  { color: defaultSource === s.id ? color.accent.base : color.text.muted },
-                ]}
-              >
-                {defaultSource === s.id ? 'On' : 'Use'}
-              </Text>
-            </Pressable>
-          </SettingRow>
+          <SettingRow
+            key={s.id}
+            label={s.label}
+            hint={`Start every episode on ${s.label} when it has one`}
+            selected={defaultSource === s.id}
+            onSelect={() => setSetting('player.defaultSource', s.id)}
+          />
         ))}
       </SettingSection>
 
@@ -144,24 +120,13 @@ export default function PlayerSettings() {
           Locked when a source offers it; otherwise the player stays in Auto. The quality menu in the player still overrides it per episode.
         </Text>
         {PLAYER_DEFAULT_QUALITIES.map((q) => (
-          <SettingRow key={q.key} label={q.label} hint={q.hint}>
-            <Pressable
-              accessibilityRole="radio"
-              accessibilityState={{ selected: defaultQuality === q.key }}
-              onPress={() => setSetting('player.defaultQuality', q.key)}
-              hitSlop={8}
-              style={styles.pick}
-            >
-              <Text
-                style={[
-                  styles.pickText,
-                  { color: defaultQuality === q.key ? color.accent.base : color.text.muted },
-                ]}
-              >
-                {defaultQuality === q.key ? 'On' : 'Use'}
-              </Text>
-            </Pressable>
-          </SettingRow>
+          <SettingRow
+            key={q.key}
+            label={q.label}
+            hint={q.hint}
+            selected={defaultQuality === q.key}
+            onSelect={() => setSetting('player.defaultQuality', q.key)}
+          />
         ))}
       </SettingSection>
 
@@ -173,24 +138,11 @@ export default function PlayerSettings() {
               ? 'Jumps past the opening once per episode. Turn off to watch every intro.'
               : 'Openings play in full. The manual Skip button still works.'
           }
-        >
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: autoSkipIntro }}
-            onPress={() => setSetting('player.autoSkipIntro', !autoSkipIntro)}
-            hitSlop={8}
-            style={styles.pick}
-          >
-            <Text
-              style={[
-                styles.pickText,
-                { color: autoSkipIntro ? color.accent.base : color.text.muted },
-              ]}
-            >
-              {autoSkipIntro ? 'On' : 'Off'}
-            </Text>
-          </Pressable>
-        </SettingRow>
+          toggle={{
+            value: autoSkipIntro,
+            onChange: (v) => setSetting('player.autoSkipIntro', v),
+          }}
+        />
         <SettingRow
           label="Auto-skip outro"
           hint={
@@ -198,47 +150,23 @@ export default function PlayerSettings() {
               ? 'Jumps past the ending when it starts. Watch out for post-credits tags.'
               : 'Endings play in full. The manual Skip button still works.'
           }
-        >
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: autoSkipOutro }}
-            onPress={() => setSetting('player.autoSkipOutro', !autoSkipOutro)}
-            hitSlop={8}
-            style={styles.pick}
-          >
-            <Text
-              style={[
-                styles.pickText,
-                { color: autoSkipOutro ? color.accent.base : color.text.muted },
-              ]}
-            >
-              {autoSkipOutro ? 'On' : 'Off'}
-            </Text>
-          </Pressable>
-        </SettingRow>
+          toggle={{
+            value: autoSkipOutro,
+            onChange: (v) => setSetting('player.autoSkipOutro', v),
+          }}
+        />
       </SettingSection>
 
       <SettingSection title="Buffer">
         <Text style={[styles.bufferHint, { color: color.text.muted }]}>Controls video buffered ahead of playback. Higher settings use more memory; earlier timeline seeks may still need to load.</Text>
         {PLAYER_BUFFERS.map((b) => (
-          <SettingRow key={b.key} label={b.label} hint={b.hint}>
-            <Pressable
-              accessibilityRole="radio"
-              accessibilityState={{ selected: buffer === b.key }}
-              onPress={() => setSetting('player.buffer', b.key as PlayerBufferKey)}
-              hitSlop={8}
-              style={styles.pick}
-            >
-              <Text
-                style={[
-                  styles.pickText,
-                  { color: buffer === b.key ? color.accent.base : color.text.muted },
-                ]}
-              >
-                {buffer === b.key ? 'On' : 'Use'}
-              </Text>
-            </Pressable>
-          </SettingRow>
+          <SettingRow
+            key={b.key}
+            label={b.label}
+            hint={b.hint}
+            selected={buffer === b.key}
+            onSelect={() => setSetting('player.buffer', b.key as PlayerBufferKey)}
+          />
         ))}
       </SettingSection>
 
@@ -246,52 +174,54 @@ export default function PlayerSettings() {
         <SettingSection title="Episode cache">
           <Text style={[styles.bufferHint, { color: color.text.muted }]}>Keeps stream data on this device while watching, then clears it when you leave. Higher limits use more storage; they don’t guarantee a fixed rewind duration. Changes while watching apply after you leave the player.</Text>
           {PLAYER_CACHES.map((profile) => (
-            <SettingRow key={profile.key} label={profile.label} hint={profile.hint}>
-              <Pressable
-                accessibilityRole="radio"
-                accessibilityState={{ selected: cache === profile.key }}
-                onPress={() => {
-                  setSetting('player.cache', profile.key as PlayerCacheKey);
-                  void setVideoCacheSizeAsync(profile.bytes).catch(() => {
-                    // An existing player prevents changing Expo's global cache
-                    // limit; the selected value is applied on the next launch.
-                  });
-                }}
-                hitSlop={8}
-                style={styles.pick}
-              >
-                <Text style={[styles.pickText, { color: cache === profile.key ? color.accent.base : color.text.muted }]}>
-                  {cache === profile.key ? 'On' : 'Use'}
-                </Text>
-              </Pressable>
-            </SettingRow>
+            <SettingRow
+              key={profile.key}
+              label={profile.label}
+              hint={profile.hint}
+              selected={cache === profile.key}
+              onSelect={() => {
+                setSetting('player.cache', profile.key as PlayerCacheKey);
+                void setVideoCacheSizeAsync(profile.bytes).catch(() => {
+                  // An existing player prevents changing Expo's global cache
+                  // limit; the selected value is applied on the next launch.
+                });
+              }}
+            />
           ))}
         </SettingSection>
       ) : null}
+
+      {/* The gesture's own preference, kept next to the chips because both are
+          "how the player behaves under my thumb". Two rows, not a swap switch:
+          a switch says "the other one" without ever naming either half. */}
+      <SettingSection title="Swipe sides">
+        <Text style={[styles.bufferHint, { color: color.text.muted }]}>
+          Slide up or down on the video to change volume or brightness. Which one you get depends on the half you start the slide on. Swiping up always raises.
+        </Text>
+        {PLAYER_SWIPE_SIDES.map((s) => (
+          <SettingRow
+            key={s.key}
+            label={s.label}
+            hint={s.hint}
+            selected={swipeSides === s.key}
+            onSelect={() => setSetting('player.swipeSides', s.key)}
+          />
+        ))}
+      </SettingSection>
 
       <SettingSection title="Player controls">
         <Text style={[styles.bufferHint, { color: color.text.muted }]}>
           Hide the bottom-bar chips you never use. Hidden chips come back the moment you turn them on — nothing is removed from the player itself.
         </Text>
         {PLAYER_TRIGGER_IDS.map((id) => (
-          <SettingRow key={id} label={TRIGGER_WORDS[id].label} hint={TRIGGER_WORDS[id].hint}>
-            <Pressable
-              accessibilityRole="switch"
-              accessibilityState={{ selected: !hiddenIds.has(id) }}
-              onPress={() => toggleHidden(id)}
-              hitSlop={8}
-              style={styles.pick}
-            >
-              <Text
-                style={[
-                  styles.pickText,
-                  { color: hiddenIds.has(id) ? color.text.muted : color.accent.base },
-                ]}
-              >
-                {hiddenIds.has(id) ? 'Hidden' : 'Shown'}
-              </Text>
-            </Pressable>
-          </SettingRow>
+          <SettingRow
+            key={id}
+            label={TRIGGER_WORDS[id].label}
+            hint={TRIGGER_WORDS[id].hint}
+            // The stored value is the list of HIDDEN ids, so the switch reads the
+            // inverse — "on" means the chip is shown, which is what the row says.
+            toggle={{ value: !hiddenIds.has(id), onChange: () => toggleHidden(id) }}
+          />
         ))}
       </SettingSection>
 
@@ -305,7 +235,7 @@ export default function PlayerSettings() {
             accessibilityRole="button"
             hitSlop={8}
           >
-            <Text style={[styles.pickText, { color: color.status.danger }]}>Clear</Text>
+            <Text style={[styles.clearText, { color: color.status.danger }]}>Clear</Text>
           </Pressable>
         </SettingRow>
       </SettingSection>
@@ -314,7 +244,6 @@ export default function PlayerSettings() {
 }
 
 const styles = StyleSheet.create({
-  pick: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
-  pickText: { fontFamily: font.semibold, fontSize: 14 },
   bufferHint: { fontSize: 13, lineHeight: 18, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  clearText: { fontFamily: font.semibold, fontSize: 14 },
 });

@@ -29,7 +29,7 @@
 
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { openAnime } from '@/lib/nav/pushOnce';
+import { openAnime, openEpisode as openEpisodeNav, pushOnce } from '@/lib/nav/pushOnce';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -381,14 +381,51 @@ export default function AnimeDetailScreen() {
   // this was local state, which is `T | null`, and a query is `T | undefined`.
   useFocusBrowsing(media ?? null, animeId);
 
+  /**
+   * RE-BIND THE HEADER ART WHEN THIS SCREEN COMES BACK FROM THE PLAYER.
+   *
+   * Reported: returning from the player left the banner black. The player is the
+   * one LANDSCAPE route in the app, so popping it is an orientation round-trip,
+   * and react-native-screens DETACHES this screen's view for the duration of the
+   * player. expo-image's Android view survives the detach, but the drawable it
+   * was showing does not reliably come back with it — the wrap's own near-black
+   * background is what shows through. Nothing asked the image for its bitmap a
+   * second time: the React component never remounted and its `source` never
+   * changed, which is a native view that lost its bitmap under a React tree that
+   * is certain it is already correct.
+   *
+   * So focus bumps an epoch and both header images take it as their `key`, which
+   * remounts the native view and re-reads from the memory/disk cache — the file
+   * is already local, so this is a frame of work, not a request.
+   *
+   * `transition` drops to 0 on the remount ON PURPOSE. The fade belongs to the
+   * first arrival; restarting it here would reproduce the same gap in a nicer
+   * costume (a picture fading in over the black it was just reported as), and on
+   * Android a transition that starts while the view is being re-attached is the
+   * exact animator whose cancellation can leave the view at alpha 0.
+   */
+  const [artEpoch, setArtEpoch] = useState(0);
+  const firstArtFocusRef = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstArtFocusRef.current) {
+        firstArtFocusRef.current = false;
+        return;
+      }
+      setArtEpoch((n) => n + 1);
+    }, [])
+  );
+
   const openEpisode = useCallback(
     (ep: number) => {
-      router.push({
-        pathname: '/watch/[id]/[ep]',
-        params: { id: String(animeId), ep: String(ep) },
-      });
+      // Guarded — see `lib/nav/pushOnce.ts`. This CTA and the episode tiles are
+      // the two most-tapped controls on the page, and a second push here used to
+      // mount a SECOND player (two video instances, two streams, two screens to
+      // back out of) for one intention. The guard drops it while the player is
+      // the focused route, whatever the timing.
+      openEpisodeNav(animeId, ep);
     },
-    [router, animeId]
+    [animeId]
   );
 
   const openMedia = useCallback(
@@ -758,10 +795,12 @@ export default function AnimeDetailScreen() {
                 <View style={styles.bannerWrap}>
                   {banner ? (
                     <Image
+                      // Remounted on focus — see `artEpoch` above.
+                      key={`banner-${artEpoch}`}
                       source={{ uri: banner }}
                       style={StyleSheet.absoluteFill}
                       contentFit="cover"
-                      transition={250}
+                      transition={artEpoch === 0 ? 250 : 0}
                       cachePolicy="memory-disk"
                     />
                   ) : null}
@@ -804,12 +843,15 @@ export default function AnimeDetailScreen() {
                   >
                     <View style={[styles.posterWrap, { backgroundColor: color.bg.elevated }]}>
                       <Image
+                        // Same re-bind as the banner: the poster is in the same
+                        // detached view and has the same failure mode.
+                        key={`poster-${artEpoch}`}
                         source={{
                           uri: media.coverImage?.extraLarge ?? media.coverImage?.large,
                         }}
                         style={StyleSheet.absoluteFill}
                         contentFit="cover"
-                        transition={200}
+                        transition={artEpoch === 0 ? 200 : 0}
                         cachePolicy="memory-disk"
                       />
                     </View>
@@ -1961,7 +2003,6 @@ function CharacterStrip({
   animeTitle: string;
 }) {
   const { color } = useTheme();
-  const router = useRouter();
   return (
     <ScrollView
       horizontal
@@ -2012,9 +2053,12 @@ function CharacterStrip({
       {/* View all — a quiet dashed-ish card at the end of the strip. */}
       <Pressable
         onPress={() =>
-          router.push({
-            pathname: '/anime/[id]/characters',
-            params: { id: String(animeId), title: animeTitle },
+          // Guarded — see `lib/nav/pushOnce.ts`. The characters page is reached
+          // from one tile at the end of a horizontal strip, which a mistimed tap
+          // repeats like any other rail.
+          pushOnce('/anime/[id]/characters', {
+            id: String(animeId),
+            title: animeTitle,
           })
         }
         accessibilityRole="button"

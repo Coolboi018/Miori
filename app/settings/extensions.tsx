@@ -447,12 +447,11 @@ export default function ExtensionsSettings() {
             <SettingRow
               label="Automatic updates"
               hint="Check a few seconds after launch and install new source versions."
-            >
-              <SettingSwitch
-                value={autoUpdate}
-                onValueChange={(v) => setSetting('extensions.autoUpdate', v)}
-              />
-            </SettingRow>
+              toggle={{
+                value: autoUpdate,
+                onChange: (v) => setSetting('extensions.autoUpdate', v),
+              }}
+            />
             {updates && updates.updates.length > 0 ? (
               <View style={styles.updateList}>
                 {updates.updates.map((u, i) => (

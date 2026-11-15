@@ -36,7 +36,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { type ContinueItem, type HomeSections, type MediaItem } from '@/lib/anilist';
 import { useUserId } from '@/lib/auth/session';
 import { updateBrowsing } from '@/lib/presence/discord';
@@ -101,7 +101,6 @@ interface HomeBlock {
 const ALL_SECTIONS = 8;
 
 export default function HomeScreen() {
-  const router = useRouter();
   const tabBarSpace = useTabBarClearance();
   const continueOn = useSetting('features.continueWatching');
   const planningOn = useSetting('features.planning');
@@ -276,9 +275,11 @@ export default function HomeScreen() {
   const seeAll = useCallback(
     (patch: Partial<ExploreFilters>) => {
       requestBrowse(patch);
-      router.push('/(tabs)/explore');
+      // Guarded — see `lib/nav/pushOnce.ts`. "See all" sits at the end of a
+      // rail header and is tapped twice whenever the first tap feels late.
+      pushOnce('/(tabs)/explore');
     },
-    [router]
+    []
   );
 
   /**

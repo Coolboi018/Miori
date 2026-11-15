@@ -1,6 +1,6 @@
 // The gesture surface: everything you can do by touching the video itself.
 //
-// Three gestures, arbitrated against each other by a single `PanResponder`
+// Four gestures, arbitrated against each other by a single `PanResponder`
 // rather than by nesting `Pressable`s. That is a deliberate departure from the
 // obvious approach (a `Pressable` for the tap, a `LongPress` recogniser on top),
 // and the reason is ARBITRATION:
@@ -41,6 +41,21 @@
 // The promotion validates its stamp before firing, so a tap superseded by a
 // pair or a new press is never delivered.
 //
+// THE FOURTH GESTURE — the vertical swipe for volume / brightness — is the one
+// that had to be added without disturbing the other three. Its rules live in
+// `verticalSwipe.ts` (pure, and driven directly by
+// `scripts/check-vertical-swipe.ts`); the separation from the speed hold is:
+//
+//   press sits still past `HOLD_MS`  → speed, and it owns the gesture from then
+//                                      on (`engagesVertical` refuses while
+//                                      holding)
+//   press moves first               → volume / brightness on the half of the
+//                                      screen it started on
+//
+// A vertical swipe resolves NOTHING else: it never toggles the chrome, never
+// seeks, and it cancels any parked half-pair before it starts. See the release
+// handler — the vertical branch returns before the tap arbitration runs.
+//
 // THE SPEED MODEL LIVES IN `lib/player/speed.ts`. This file only translates
 // gestures into calls on it. It holds no speed value of its own and never
 // computes a restore target — that indirection is the whole fix, and a local
@@ -58,7 +73,16 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 
-import { SeekHud, SpeedHud } from './Hud';
+import { SeekHud, SideHud, SpeedHud } from './Hud';
+import {
+  dragFraction,
+  engagesVertical,
+  kindForX,
+  sideForX,
+  type SwipeKind,
+  type SwipeSide,
+  type SwipeSides,
+} from './verticalSwipe';
 import { RIPPLE_MS, SeekRipple, SKIP_SECONDS } from '@/components/player/SeekRipple';
 import { DOUBLE_TAP_MS, EMPTY_TAP_STATE, deliverMatured, resolveTap, type TapState } from './tapArbiter';
 
@@ -85,12 +109,27 @@ export interface GestureHandlers {
   onHoldStart: () => void;
   onHoldMove: (dyPx: number) => void;
   onHoldEnd: () => void;
+  /**
+   * A vertical drag has engaged on one half of the surface. The screen captures
+   * its baseline value here — the surface knows the geometry, never the value.
+   * `side` is where the press started, and is where the readout must draw.
+   */
+  onVerticalStart: (kind: SwipeKind, side: SwipeSide) => void;
+  /**
+   * Travel since `onVerticalStart`, as a FRACTION of the surface height, positive
+   * upward. The screen adds it to the baseline and clamps; see `verticalSwipe.ts`
+   * for why the fraction is raw.
+   */
+  onVerticalMove: (fraction: number) => void;
+  /** The finger lifted (or the gesture died): commit and put the HUD away. */
+  onVerticalEnd: () => void;
 }
 
 export const GestureSurface = memo(function GestureSurface({
   enabled,
   locked,
   handlers,
+  swipeSides,
   /** Live boost rate for the HUD, or null when not holding. */
   boostRate,
 }: {
@@ -98,6 +137,8 @@ export const GestureSurface = memo(function GestureSurface({
   /** Locked controls: a tap wakes the unlock affordance and nothing else. */
   locked: boolean;
   handlers: GestureHandlers;
+  /** Which knob each half of the screen drives — from `player.swipeSides`. */
+  swipeSides: SwipeSides;
   /** Non-null only while a long-press is held. */
   boostRate: number | null;
 }) {
@@ -115,6 +156,25 @@ export const GestureSurface = memo(function GestureSurface({
   enabledRef.current = enabled;
 
   const widthRef = useRef(0);
+  /** The surface height — the denominator of every vertical-swipe fraction. */
+  const heightRef = useRef(0);
+  /** Where the CURRENT press started, horizontally. Decides volume vs brightness. */
+  const startXRef = useRef(0);
+  /**
+   * The engaged vertical drag, if any.
+   *
+   * `kind` is resolved ONCE, at engagement, from the press's x — a drag that
+   * crosses the midline keeps the knob it started on, because a volume swipe that
+   * turns into a brightness swipe halfway is a bug the user cannot explain.
+   */
+  const verticalRef = useRef<{ active: boolean; kind: SwipeKind | null }>({
+    active: false,
+    kind: null,
+  });
+  /** pageY at the moment the drag engaged — the zero point of the fraction. */
+  const verticalStartYRef = useRef(0);
+  const sidesRef = useRef(swipeSides);
+  sidesRef.current = swipeSides;
   /**
    * The parked tap, as the arbiter models it. All side-tap decisions go
    * through `tapArbiter.resolveTap` / `deliverMatured` — see that file for why
@@ -153,6 +213,7 @@ export const GestureSurface = memo(function GestureSurface({
 
   const onLayout = useCallback((e: LayoutChangeEvent) => {
     widthRef.current = e.nativeEvent.layout.width;
+    heightRef.current = e.nativeEvent.layout.height;
   }, []);
 
   const cancelHoldTimer = useCallback(() => {
@@ -204,6 +265,8 @@ export const GestureSurface = memo(function GestureSurface({
 
         onPanResponderGrant: (e) => {
           cancelTapPromotion();
+          startXRef.current = e.nativeEvent.locationX;
+          verticalRef.current = { active: false, kind: null };
           holdRef.current = { active: false, startY: e.nativeEvent.pageY, timer: null };
           // The hold is CONFIRMED by a timer, not assumed. Until it fires this
           // press is still a tap candidate, which is what lets a quick double-tap
@@ -216,20 +279,68 @@ export const GestureSurface = memo(function GestureSurface({
           }, HOLD_MS);
         },
 
-        onPanResponderMove: (e) => {
+        onPanResponderMove: (e, g) => {
           const y = e.nativeEvent.pageY;
+
+          // An engaged vertical swipe keeps the gesture exclusively — including
+          // above the dominance test, which is a START condition (see
+          // `verticalSwipe.ts`): a swipe that arcs near the end must not drop out.
+          if (verticalRef.current.active) {
+            hRef.current.onVerticalMove(
+              dragFraction(verticalStartYRef.current, y, heightRef.current)
+            );
+            return;
+          }
+
           if (holdRef.current.active) {
             // Promoted: movement IS the speed scrub. Up (negative dy) is faster.
+            // A speed hold OWNS the gesture from here — `engagesVertical` refuses
+            // while `holding`, so the two can never both claim one press.
             hRef.current.onHoldMove(holdRef.current.startY - y);
             return;
           }
-          // Not yet promoted: movement past the slop means this is a drag, not
-          // a hold, so cancel the pending promotion. Without this a swipe across
-          // the video would boost the speed as well.
+
+          // Not yet promoted: is this a vertical swipe, or a drag that should
+          // just cancel the pending hold?
+          if (
+            engagesVertical(g.dx, g.dy, {
+              holding: holdRef.current.active,
+              locked: lockedRef.current,
+            })
+          ) {
+            cancelHoldTimer();
+            // A drag is not a tap and never was: kill any parked half-pair first,
+            // or a swipe would be followed by the parked toggle of an older tap.
+            cancelTapPromotion();
+            lastTapRef.current = EMPTY_TAP_STATE;
+            const side = sideForX(startXRef.current, widthRef.current);
+            const kind = kindForX(startXRef.current, widthRef.current, sidesRef.current);
+            verticalRef.current = { active: true, kind };
+            verticalStartYRef.current = y;
+            hRef.current.onVerticalStart(kind, side);
+            hRef.current.onVerticalMove(0);
+            return;
+          }
+
+          // Movement past the slop means this is a drag, not a hold, so cancel the
+          // pending promotion. Without this a swipe across the video would boost
+          // the speed as well.
           if (Math.abs(y - holdRef.current.startY) > HOLD_SLOP) cancelHoldTimer();
         },
 
         onPanResponderRelease: (e) => {
+          // A vertical swipe NEVER becomes a tap. Released before the tap
+          // arbitration, exactly like a promoted hold.
+          if (verticalRef.current.active) {
+            verticalRef.current = { active: false, kind: null };
+            cancelHoldTimer();
+            cancelTapPromotion();
+            lastTapRef.current = EMPTY_TAP_STATE;
+            holdRef.current.active = false;
+            hRef.current.onVerticalEnd();
+            return;
+          }
+
           const wasHolding = holdRef.current.active;
           cancelHoldTimer();
           holdRef.current.active = false;
@@ -297,11 +408,14 @@ export const GestureSurface = memo(function GestureSurface({
         },
 
         onPanResponderTerminate: () => {
+          const wasVertical = verticalRef.current.active;
           const wasHolding = holdRef.current.active;
+          verticalRef.current = { active: false, kind: null };
           cancelHoldTimer();
           cancelTapPromotion();
           holdRef.current.active = false;
-          if (wasHolding) hRef.current.onHoldEnd();
+          if (wasVertical) hRef.current.onVerticalEnd();
+          else if (wasHolding) hRef.current.onHoldEnd();
         },
       }),
     [addSeek, cancelHoldTimer, cancelTapPromotion]
@@ -312,6 +426,9 @@ export const GestureSurface = memo(function GestureSurface({
       {ripple ? <SeekRipple key={ripple.id} dir={ripple.dir} x={ripple.x} y={ripple.y} /> : null}
       {seekTotal ? <SeekHud delta={seekTotal.delta} side={seekTotal.side} /> : null}
       {boostRate != null ? <SpeedHud rate={boostRate} /> : null}
+      {/* Subscribes to its own store — a volume/brightness drag never re-renders
+          the player screen, only this pill. */}
+      <SideHud />
     </View>
   );
 });

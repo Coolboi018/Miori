@@ -7,8 +7,9 @@
 // gestures belong to the video surface, are expressed only as an overlay for
 // the half-second they need, and then get out of the way.
 
-import { memo, useEffect } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { memo, useEffect, useSyncExternalStore } from 'react';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   Easing,
   useAnimatedStyle,
@@ -20,6 +21,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 
 import { AppIcon } from '@/components/ui/AppIcon';
 import { formatSeekDelta } from '@/lib/player/format';
+import { readSideHud, subscribeSideHud } from '@/lib/player/sideHud';
+import { hudSideFor } from './verticalSwipe';
 import { formatRate } from '@/lib/player/speed';
 import { font, radii } from '@/lib/ui/tokens';
 
@@ -135,6 +138,99 @@ export const SeekHud = memo(function SeekHud({
   );
 });
 
+/**
+ * The volume / brightness readout — a VERTICAL bar on the half being swiped.
+ *
+ * WHY THE SIDE AND NOT THE MIDDLE. The first version was a centred pill, and it
+ * was the wrong place twice over: it covered the frame the user is watching (the
+ * one thing a HUD must never do), and it sat in the middle of the gesture's own
+ * travel — the finger drags up and down the frame's centre, so the readout was
+ * under the hand. Every player that has this gesture (VLC, MX, YouTube) puts it on
+ * the edge the finger started on, and for good reason: the eye is already there,
+ * waiting for the thing it is changing, and nothing in the picture is hidden.
+ *
+ * The side comes from the DRAG (`sideForX`), not from the knob: the halves are
+ * swappable in settings, so deriving "volume = right" in the view would draw the
+ * bar on the wrong edge for anyone who swapped them.
+ *
+ * AND IT DRAWS ON THE OPPOSITE EDGE (`hudSideFor`) — the one refinement that makes
+ * the placement actually usable. The finger is ON the half it started on; a bar
+ * there is a bar under the thumb, half of it behind the hand and the rest in the
+ * only place the eye is not looking. Mirroring it puts the readout on the one
+ * strip of screen nobody is touching. The knob is unchanged — only the display
+ * moves.
+ *
+ * THE TRACK IS THE POINT. A number alone makes the user read; a vertical fill
+ * tells them "near the top", which is the question they actually have, and it
+ * reads at a glance in peripheral vision while their thumb is on the glass. The
+ * track is a fraction of the WINDOW height rather than a constant — landscape on
+ * a short phone has ~380pt to work with, and a bar sized for a tall one would
+ * touch both edges.
+ *
+ * IT SUBSCRIBES TO ITS OWN STORE. `PlayerScreen` applies the value to the engine
+ * and never re-renders; this is the only component that knows the number. That is
+ * why the drag can be smooth on a screen with this much chrome in it.
+ */
+export const SideHud = memo(function SideHud() {
+  const hud = useSyncExternalStore(subscribeSideHud, readSideHud, readSideHud);
+  const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
+  const p = useSharedValue(0);
+  const shown = hud.kind != null;
+  /** Mirrored from the drag — see the header. */
+  const left = hudSideFor(hud.side) === 'left';
+
+  useEffect(() => {
+    p.value = withTiming(shown ? 1 : 0, {
+      duration: shown ? SHOW_MS : HIDE_MS,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [p, shown]);
+
+  /**
+   * Fade, plus a small slide FROM the edge it belongs to — the bar arrives out of
+   * the side the finger is on, which is what makes it read as part of the gesture
+   * rather than as an overlay that happened to appear.
+   */
+  const style = useAnimatedStyle(() => ({
+    opacity: p.value,
+    transform: [
+      { translateX: (1 - p.value) * (left ? -14 : 14) },
+      { scale: 0.96 + p.value * 0.04 },
+    ],
+  }));
+
+  const percent = Math.round(hud.value * 100);
+  const trackHeight = Math.round(Math.min(220, Math.max(120, height * 0.42)));
+
+  return (
+    <View
+      style={[
+        styles.sideAnchor,
+        // Clear of the notch/cutout in landscape, plus a gutter so the bar is not
+        // glued to the bezel.
+        left ? { left: insets.left + 18 } : { right: insets.right + 18 },
+      ]}
+      pointerEvents="none"
+    >
+      <Animated.View style={[styles.sidePlate, style]}>
+        <AppIcon
+          name={hud.kind === 'volume' ? 'volumeOn' : 'brightness'}
+          size={20}
+          color="#fff"
+          strokeWidth={2}
+        />
+        <View style={[styles.sideTrack, { height: trackHeight }]}>
+          {/* Filled from the BOTTOM up: 0% is an empty track, 100% a full one.
+              A top-down fill would read as a download bar. */}
+          <View style={[styles.sideFill, { height: `${percent}%` }]} />
+        </View>
+        <Text style={styles.sidePercent}>{percent}</Text>
+      </Animated.View>
+    </View>
+  );
+});
+
 const styles = StyleSheet.create({
   speedBox: {
     ...StyleSheet.absoluteFill,
@@ -185,6 +281,40 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     marginTop: 6,
     letterSpacing: 0.4,
+    fontVariant: ['tabular-nums'],
+  },
+
+  // Top/bottom pinned with no width, so the plate decides the size and the side
+  // offset decides where — nothing here measures the screen.
+  sideAnchor: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    justifyContent: 'center',
+  },
+  sidePlate: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    borderRadius: radii.full,
+    // Lighter than the speed pill on purpose: this one sits at the edge of the
+    // picture and must not read as a panel.
+    backgroundColor: 'rgba(0,0,0,0.42)',
+  },
+  sideTrack: {
+    width: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    overflow: 'hidden',
+    justifyContent: 'flex-end',
+  },
+  sideFill: { width: 6, borderRadius: 3, backgroundColor: '#fff' },
+  sidePercent: {
+    color: '#fff',
+    fontFamily: font.semibold,
+    fontSize: 12,
+    lineHeight: 16,
     fontVariant: ['tabular-nums'],
   },
 });

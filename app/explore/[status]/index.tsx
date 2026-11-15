@@ -10,7 +10,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { openAnime } from '@/lib/nav/pushOnce';
 import { fetchByStatus, mediaTitle, type MediaItem, type MediaStatus } from '@/lib/anilist';
 import { updateBrowsing } from '@/lib/presence/discord';
 import { prefetchAnime } from '@/lib/query/prefetch';
@@ -27,7 +28,7 @@ const STATUS_LABELS: Record<MediaStatus, string> = {
 };
 
 export default function StatusScreen() {
-  const router = useRouter();
+
   const params = useLocalSearchParams<{ status: MediaStatus }>();
   const tabBarSpace = useTabBarClearance();
   const { width: screenW } = useWindowDimensions();
@@ -45,9 +46,9 @@ export default function StatusScreen() {
       // Same tap-warms-the-payload the tabs do — the request the next screen
       // was going to make, started a frame earlier.
       prefetchAnime(m.id);
-      router.push({ pathname: '/anime/[id]', params: { id: String(m.id) } });
+      openAnime(m.id);
     },
-    [router]
+    []
   );
 
   const load = useCallback(

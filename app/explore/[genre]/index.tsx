@@ -10,7 +10,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { openAnime } from '@/lib/nav/pushOnce';
 import { fetchByGenre, mediaTitle, type MediaItem } from '@/lib/anilist';
 import { updateBrowsing } from '@/lib/presence/discord';
 import { prefetchAnime } from '@/lib/query/prefetch';
@@ -19,7 +20,7 @@ import { GridSkeleton } from '@/components/anime/GridSkeleton';
 import { useTabBarClearance } from '@/lib/ui/tabBar';
 
 export default function GenreScreen() {
-  const router = useRouter();
+
   const params = useLocalSearchParams<{ genre: string }>();
   const tabBarSpace = useTabBarClearance();
   const { width: screenW } = useWindowDimensions();
@@ -36,9 +37,9 @@ export default function GenreScreen() {
       // Same tap-warms-the-payload the tabs do — the request the next screen
       // was going to make, started a frame earlier.
       prefetchAnime(m.id);
-      router.push({ pathname: '/anime/[id]', params: { id: String(m.id) } });
+      openAnime(m.id);
     },
-    [router]
+    []
   );
 
   const load = useCallback(

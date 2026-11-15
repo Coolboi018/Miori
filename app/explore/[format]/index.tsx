@@ -10,7 +10,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { openAnime } from '@/lib/nav/pushOnce';
 import { fetchByFormat, mediaTitle, type MediaFormat, type MediaItem } from '@/lib/anilist';
 import { updateBrowsing } from '@/lib/presence/discord';
 import { prefetchAnime } from '@/lib/query/prefetch';
@@ -29,7 +30,7 @@ const FORMAT_LABELS: Record<MediaFormat, string> = {
 };
 
 export default function FormatScreen() {
-  const router = useRouter();
+
   const params = useLocalSearchParams<{ format: MediaFormat }>();
   const tabBarSpace = useTabBarClearance();
   const { width: screenW } = useWindowDimensions();
@@ -47,9 +48,9 @@ export default function FormatScreen() {
       // Same tap-warms-the-payload the tabs do — the request the next screen
       // was going to make, started a frame earlier.
       prefetchAnime(m.id);
-      router.push({ pathname: '/anime/[id]', params: { id: String(m.id) } });
+      openAnime(m.id);
     },
-    [router]
+    []
   );
 
   const load = useCallback(

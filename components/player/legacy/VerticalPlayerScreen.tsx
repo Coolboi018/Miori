@@ -79,6 +79,7 @@ import { fetchMedia, mediaTitle } from '@/lib/anilist';
 import { episodesToShow, releasedCount } from '@/lib/anilist/episodes';
 import { getLoadedExtensions, createRegistry, resolveEpisode } from '@/lib/extensions/registry';
 import { clearPresence, releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
+import { openAnime } from '@/lib/nav/pushOnce';
 import type { EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
 import { cueAt, parseVTT, type Cue } from '@/lib/subtitles/vtt';
 import { defaultSubtitleStyle } from '@/lib/subtitles/style';
@@ -1601,7 +1602,7 @@ export default function WatchScreen() {
               >
                 <View style={styles.cardTop}>
                   <Pressable
-                    onPress={() => router.push({ pathname: '/anime/[id]', params: { id: String(animeId) } })}
+                    onPress={() => openAnime(animeId)}
                     style={styles.stripPosterWrap}
                     accessibilityLabel={`Open ${animeTitle}`}
                   >

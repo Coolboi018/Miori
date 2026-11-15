@@ -17,7 +17,7 @@ import { AppIcon } from '@/components/ui/AppIcon';
 
 import { getToken } from '@/lib/anilist/auth';
 import { updateBrowsing } from '@/lib/presence/discord';
-import { pushOnce } from '@/lib/nav/pushOnce';
+import { pushOnce, openAnime as openAnimeNav } from '@/lib/nav/pushOnce';
 import { openCharacterSheet } from '@/lib/anime/characterSheet';
 import {
   fetchProfile,
@@ -142,8 +142,8 @@ export default function ProfileScreen() {
   }, [tab, loadList]);
 
   const openAnime = useCallback((id: number) => {
-    router.push({ pathname: '/anime/[id]', params: { id: String(id) } });
-  }, [router]);
+    openAnimeNav(id);
+  }, []);
 
   if (loading) {
     return (

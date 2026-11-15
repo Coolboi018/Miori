@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Animated,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/lib/ui/useTheme';
@@ -64,6 +72,15 @@ export default function ProfileScreen() {
     };
   }, []);
 
+  // Fade-in for the profile content once it arrives.
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (profile) {
+      fadeAnim.setValue(0);
+      Animated.timing(fadeAnim, { toValue: 1, duration: 450, useNativeDriver: true }).start();
+    }
+  }, [profile, fadeAnim]);
+
   // Discord presence: browsing the AniList profile. The focus callback runs while
   // `profile` may still be null (first load), so a second effect re-fires when it
   // arrives — same shape as the details page.
@@ -124,8 +141,14 @@ export default function ProfileScreen() {
 
   if (loading) {
     return (
-      <View style={[styles.root, { backgroundColor: color.bg.primary, paddingTop: insets.top }]}>
-        <Text style={[styles.loading, { color: color.text.muted }]}>Loading profile…</Text>
+      <View
+        style={[
+          styles.root,
+          { backgroundColor: color.bg.primary, paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' },
+        ]}
+      >
+        <ActivityIndicator size="large" color={color.accent.base} />
+        <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.md }]}>Loading profile…</Text>
       </View>
     );
   }
@@ -190,6 +213,7 @@ export default function ProfileScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: color.bg.primary }]}>
+      <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
       <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + spacing.giant }}>
         {/* Hero */}
         <View style={styles.hero}>
@@ -220,10 +244,10 @@ export default function ProfileScreen() {
 
         {/* Stats */}
         <View style={[styles.statsCard, { backgroundColor: color.bg.surface }]}>
-          <Stat label="Anime" value={profile.stats.count} color={color} />
-          <Stat label="Episodes" value={profile.stats.episodesWatched} color={color} />
-          <Stat label="Minutes" value={profile.stats.minutesWatched} color={color} />
-          <Stat label="Mean score" value={profile.stats.meanScore.toFixed(1)} color={color} />
+          <Stat icon="tv" label="Anime" value={profile.stats.count} color={color} />
+          <Stat icon="play" label="Episodes" value={profile.stats.episodesWatched} color={color} />
+          <Stat icon="hourglass" label="Minutes" value={profile.stats.minutesWatched} color={color} />
+          <Stat icon="star" label="Mean score" value={profile.stats.meanScore.toFixed(1)} color={color} />
         </View>
 
         {/* Tabs */}
@@ -254,13 +278,16 @@ export default function ProfileScreen() {
             </Section>
           </View>
         ) : listLoading ? (
-          <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.xl }]}>Loading…</Text>
+          <View style={{ alignItems: 'center', marginTop: spacing.xl, gap: spacing.sm }}>
+            <ActivityIndicator size="small" color={color.accent.base} />
+            <Text style={[styles.loading, { color: color.text.muted }]}>Loading…</Text>
+          </View>
         ) : list.length === 0 ? (
           <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.xl }]}>Nothing here yet.</Text>
         ) : (
           <View style={styles.grid}>
             {list.map((e, i) => (
-              <Pressable key={`${e.id}-${i}`} onPress={() => openAnime(e.id)} style={styles.gridItem}>
+              <Pressable key={`${e.id}-${i}`} onPress={() => openAnime(e.id)} style={({ pressed }) => [styles.gridItem, { opacity: pressed ? 0.7 : 1 }]}>
                 {e.cover ? (
                   <Image source={{ uri: e.cover }} style={styles.gridCover} contentFit="cover" />
                 ) : (
@@ -278,13 +305,15 @@ export default function ProfileScreen() {
           </View>
         )}
       </ScrollView>
+      </Animated.View>
     </View>
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: any; color: any }) {
+function Stat({ icon, label, value, color }: { icon: string; label: string; value: any; color: any }) {
   return (
     <View style={styles.stat}>
+      <AppIcon name={icon as any} size={16} color={color.text.muted} />
       <Text style={[styles.statValue, { color: color.text.primary }]}>{value}</Text>
       <Text style={[styles.statLabel, { color: color.text.muted }]}>{label}</Text>
     </View>
@@ -307,7 +336,7 @@ function HorizontalList({ items, onPress, color }: { items: FavouriteAnime[]; on
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
       {items.map((a, i) => (
-        <Pressable key={`${a.id}-${i}`} onPress={() => onPress(a.id)} style={styles.favCard}>
+        <Pressable key={`${a.id}-${i}`} onPress={() => onPress(a.id)} style={({ pressed }) => [styles.favCard, { opacity: pressed ? 0.7 : 1 }]}>
           {a.cover ? (
             <Image source={{ uri: a.cover }} style={styles.favCover} contentFit="cover" />
           ) : (
@@ -332,7 +361,7 @@ function CharacterList({ items, color }: { items: FavouriteCharacter[]; color: a
         <Pressable
           key={`${c.id}-${i}`}
           onPress={() => openCharacterSheet({ id: c.id, name: c.name, image: c.image })}
-          style={styles.charCard}
+          style={({ pressed }) => [styles.charCard, { opacity: pressed ? 0.7 : 1 }]}
         >
           {c.image ? (
             <Image source={{ uri: c.image }} style={styles.charImg} contentFit="cover" />

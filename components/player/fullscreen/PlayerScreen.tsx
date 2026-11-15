@@ -101,7 +101,7 @@ import { createRegistry, resolveEpisode } from '@/lib/extensions/registry';
 import { fetchText } from '@/lib/extensions/fetch';
 import { listVariants, type HlsVariant } from '@/lib/extensions/hls';
 import type { Container, EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
-import { clearPresence, releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
+import { releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
 import { fetchMedia, mediaTitle, type MediaDetail } from '@/lib/anilist';
 import { episodesToShow, nextPlayableEpisode } from '@/lib/anilist/episodes';
 import {
@@ -2933,8 +2933,15 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // up by anything else in the app.
       if (!linkOk) return;
       void savePosition(animeId, epNum, positionRef.current);
+      // Leave presence to releasePresence() ALONE. It drops any queued watch
+      // frame and, after a beat, stands down to whatever the destination screen
+      // asserted (the details page re-asserts on focus) — one connection, one
+      // card, always. A `clearPresence()` used to run right after this and it
+      // is the "messed up on the way back from the player" bug: it sends an
+      // empty activity immediately, wiping the very details card the return
+      // trip had just pushed, so backing out of the player left the account
+      // showing nothing.
       releasePresence();
-      void clearPresence();
     },
     [animeId, epNum, linkOk]
   );

@@ -33,8 +33,13 @@ const UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36';
 
 const GW_HTML = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:transparent"><script>
-var ws=null,token=null,activity=null,seq=null,hbTimer=null,retryTimer=null,retryCount=0,manual=false,ready=false,refreshTimer=null,lastRx=0,hbInterval=30000,gen=0;
+var ws=null,token=null,activity=null,seq=null,sessionId=null,attemptResume=false,connectTimer=null,hbTimer=null,retryTimer=null,retryCount=0,manual=false,ready=false,refreshTimer=null,lastRx=0,hbInterval=30000,gen=0;
 function post(o){try{window.ReactNativeWebView.postMessage(JSON.stringify(o));}catch(e){}}
+// Report the live session out to RN so it survives this page: a WebView
+// renderer killed by Android comes back with no memory of the socket, and RN
+// hands the session straight back (see the 'start' handler) so the new page
+// RESUMEs instead of IDENTIFYing a second session — two cards.
+function postSession(){if(sessionId)post({kind:'session',sessionId:sessionId,seq:seq});}
 function payload(a){
   var act={name:(a&&a.name)||'Miori',type:(a&&a.type)||0,details:((a&&a.details)||'Browsing').slice(0,128),timestamps:{start:(a&&a.startTimestamp)||Date.now()}};
   var st=a&&a.state?String(a.state).slice(0,128):'';
@@ -78,6 +83,14 @@ function retire(sock,myGen,then){
     if(then&&myGen===gen)then();
   },200);
 }
+// Silent teardown — no clear, no goodbye. Used when we are about to RESUME the
+// same session: clearing would blank the card for no reason, and the session
+// must stay alive for the resume to re-attach to it.
+function hardClose(sock){
+  if(!sock)return;
+  try{sock.onopen=null;sock.onmessage=null;sock.onclose=null;sock.onerror=null;}catch(e){}
+  try{sock.close();}catch(e){}
+}
 function open(){
   // Generation guard. A socket closed while still handshaking does not always
   // die immediately, so an orphan can still deliver events. Everything below is
@@ -86,17 +99,45 @@ function open(){
   var myGen=++gen;
   var dying=ws;
   ws=null;
-  // Retire the old socket and let its clear message flush BEFORE the new
-  // session identifies. The other order lets the clear land on the new session
-  // and wipe the activity we just set.
-  retire(dying,myGen,function(){spawn(myGen);});
+  // RESUME whenever we still own a session id. This is the whole "one RPC"
+  // rule: a reconnect must re-attach to the SAME Discord session. A fresh
+  // IDENTIFY while Discord still holds the old session — a dropped socket keeps
+  // it resumable for MINUTES, which is exactly why the duplicate "cleared after
+  // a while" — registers a SECOND session, and Discord then shows BOTH
+  // activities (the stale card plus the new one) until the old one times out.
+  // Only identify when there is nothing to resume, or Discord has told us the
+  // session is gone (op 9, d=false). A resume also needs the last sequence
+  // number, so require both — otherwise a half-known session would send op 6
+  // with a null seq and get bounced straight back.
+  attemptResume=!!(sessionId&&seq!==null);
+  if(attemptResume){
+    hardClose(dying);
+    spawn(myGen);
+  }else{
+    // Ending it for real: say goodbye to Discord so nothing is left frozen,
+    // then let that flush BEFORE the new session identifies. The other order
+    // lets the clear land on the new session and wipe the activity we just set.
+    retire(dying,myGen,function(){spawn(myGen);});
+  }
 }
 function spawn(myGen){
   if(myGen!==gen)return;
   try{ws=new WebSocket('wss://gateway.discord.gg/?v=10&encoding=json');}catch(e){schedule();return;}
   lastRx=Date.now();
   post({kind:'phase',phase:'connecting'});
-  ws.onopen=function(){if(myGen!==gen)return;post({kind:'phase',phase:'socket-open'});};
+  // A CONNECTING socket that never opens (dead network mid-handshake) has no
+  // watchdog — the silence watchdog only arms after HELLO — so it would sit
+  // forever. Bound the handshake here instead.
+  if(connectTimer)clearTimeout(connectTimer);
+  connectTimer=setTimeout(function(){
+    connectTimer=null;
+    if(ws&&ws.readyState===0&&!manual)reopen('connect-timeout');
+  },12000);
+  ws.onopen=function(){
+    if(myGen!==gen)return;
+    if(connectTimer){clearTimeout(connectTimer);connectTimer=null;}
+    post({kind:'phase',phase:'socket-open'});
+  };
   ws.onmessage=function(ev){
     if(myGen!==gen)return;
     lastRx=Date.now();
@@ -111,18 +152,50 @@ function spawn(myGen){
       // often than not, and a dead ws means Discord shows us offline.
       if(refreshTimer)clearInterval(refreshTimer);
       refreshTimer=setInterval(function(){
-        if(ws&&ws.readyState===1){if(Date.now()-lastRx>hbInterval*2.5){reopen('watchdog');}else{sendOp3();}}
+        if(ws&&ws.readyState===1){if(Date.now()-lastRx>hbInterval*2.5){reopen('watchdog');}else{sendOp3();postSession();}}
       },Math.max(5000,Math.floor(hbInterval/2)));
       beat();
-      // Discord 4009s a re-identify that lands too soon after a dirty close.
-      // Identify is already delayed by schedule()'s backoff; identify it now.
+      // Two ways in, and picking the wrong one is how "two cards" happens.
+      //
+      // RESUME re-attaches the SAME Discord session, so the activity Discord
+      // is already showing simply continues — one session, one card. A dropped
+      // socket does NOT end a session: Discord keeps it resumable for MINUTES,
+      // which is exactly why the duplicate "cleared after a while" rather than
+      // instantly. IDENTIFY here would register a SECOND session while the old
+      // one is still alive, and Discord then shows BOTH. So identify only when
+      // there is nothing to resume, or Discord has told us the session is gone
+      // (op 9, d=false — see below).
       try{
-        ws.send(JSON.stringify({op:2,d:{token:token,capabilities:30717,properties:{os:'Android',browser:'Chrome',device:'',system_locale:'en-US',browser_user_agent:'${UA}',browser_version:'126.0',os_version:'14',referrer:'',referring_domain:'',referrer_current:'',referring_domain_current:'',release_channel:'stable',client_build_number:361372,client_event_source:null},presence:payload(activity),compress:false,client_state:{guild_versions:{}}}}));
-        lastOp3Sent=Date.now();
-        post({kind:'phase',phase:'identified'});
+        if(attemptResume&&sessionId&&seq!==null){
+          ws.send(JSON.stringify({op:6,d:{token:token,session_id:sessionId,seq:seq}}));
+          post({kind:'phase',phase:'resuming'});
+        }else{
+          // Discord 4009s a re-identify that lands too soon after a dirty close.
+          // Identify is already delayed by schedule()'s backoff; identify now.
+          ws.send(JSON.stringify({op:2,d:{token:token,capabilities:30717,properties:{os:'Android',browser:'Chrome',device:'',system_locale:'en-US',browser_user_agent:'${UA}',browser_version:'126.0',os_version:'14',referrer:'',referring_domain:'',referrer_current:'',referring_domain_current:'',release_channel:'stable',client_build_number:361372,client_event_source:null},presence:payload(activity),compress:false,client_state:{guild_versions:{}}}}));
+          lastOp3Sent=Date.now();
+          post({kind:'phase',phase:'identified'});
+        }
       }catch(e){schedule();}
     }
-    else if(m.op===0&&m.t==='READY'){ready=true;retryCount=0;post({kind:'phase',phase:'ready'});}
+    else if(m.op===0&&m.t==='READY'){
+      ready=true;retryCount=0;attemptResume=false;
+      // Remember the session so any future reconnect RESUMEs instead of
+      // IDENTIFYing. Without this the very next blip starts a second session.
+      sessionId=m.d&&m.d.session_id?m.d.session_id:null;
+      postSession();
+      post({kind:'phase',phase:'ready'});
+    }
+    else if(m.op===0&&m.t==='RESUMED'){
+      // The op 6 landed on the SAME session, so the card Discord is already
+      // showing just continues — no second session, no second card. Discord
+      // replays the session's events but not the presence, so re-assert the
+      // current activity now rather than waiting a refresh tick.
+      ready=true;retryCount=0;attemptResume=false;
+      postSession();
+      sendOp3(true);
+      post({kind:'phase',phase:'ready'});
+    }
     else if(m.op===1){beat();}
     else if(m.op===7){try{ws.close();}catch(e){}schedule();}
     else if(m.op===9){
@@ -130,6 +203,12 @@ function spawn(myGen){
       // single 4009 — routine after any unclean disconnect — left the client
       // permanently dead and the account showed offline forever. Re-identify
       // instead, with a randomised delay, and give up only on a real stop.
+      //
+      // m.d is the whole story: true means the session is still resumable, so
+      // keep it and let the next connect resume. false means it is gone for
+      // good — forget it, or op 6 would be bounced back forever and we would
+      // never identify a working session.
+      if(m.d!==true)sessionId=null;
       post({kind:'phase',phase:'closed',code:4009,error:'invalid session'});
       try{ws.close();}catch(e){}
       var d=1000+Math.floor(Math.random()*4000);
@@ -195,6 +274,7 @@ function reopen(why){
 function shutdown(){
   var myGen=++gen;
   manual=true;
+  if(connectTimer){clearTimeout(connectTimer);connectTimer=null;}
   if(hbTimer){clearInterval(hbTimer);hbTimer=null;}
   if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null;}
   if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}
@@ -212,6 +292,11 @@ window.__miori=function(raw){
   var m;try{m=JSON.parse(raw);}catch(e){return;}
   if(m.t==='start'){
     manual=false;token=m.token;activity=m.activity;
+    // A fresh page (Android killed the renderer) has no session of its own, but
+    // RN remembered the one the previous page held. Adopt it so the very first
+    // connect RESUMEs instead of IDENTIFYing a second session. Guarded: a page
+    // that still owns a session is never overwritten by a stale copy.
+    if(!sessionId&&m.sessionId){sessionId=m.sessionId;seq=(typeof m.seq==='number')?m.seq:null;}
     ensure();
   }else if(m.t==='presence'){
     activity=m.activity;
@@ -228,7 +313,7 @@ window.__miori=function(raw){
     // Same rule on the way out: say goodbye to Discord, or it keeps showing
     // this session's last activity as a frozen second card.
     var myGen=++gen;
-    manual=true;if(hbTimer){clearInterval(hbTimer);hbTimer=null;}if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null;}if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}
+    manual=true;if(connectTimer){clearTimeout(connectTimer);connectTimer=null;}if(hbTimer){clearInterval(hbTimer);hbTimer=null;}if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null;}if(retryTimer){clearTimeout(retryTimer);retryTimer=null;}
     var dying=ws;ws=null;
     retire(dying,myGen,null);
   }

@@ -1,6 +1,7 @@
 // Gateway transport: runs inside a hidden WebView (real Chromium socket
 // stack) because React Native's raw WebSocket kept dropping (1006) on
 // mobile networks. Same API as before — discord.ts/modal are untouched.
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { readSetting } from '@/lib/settings/store';
 
 export interface PresenceActivity {
@@ -47,6 +48,43 @@ let desired: Desired | null = null;
 let pushImpl: ((msg: string) => void) | null = null;
 let bridgeReady = false;
 let outbox: string[] = [];
+
+/** The live Discord session id/seq last reported by the hidden page. Held here
+ * so a re-created page can RESUME the same session instead of IDENTIFYing a new
+ * one (see `_onGatewayEvent`). Deliberately NOT cleared on stop: resuming the
+ * same session is always preferable to standing up a second one. */
+let lastSession: { id: string; seq: number | null } | null = null;
+
+// Persisted across app restarts. Android can kill the whole app while a session
+// is live, and Discord keeps that session resumable for MINUTES afterwards —
+// a restarted app that IDENTIFYs instead puts a SECOND session (and so a
+// second activity card) on the account until the old one times out. The
+// snapshot is only a session id + sequence; on its own it grants nothing, the
+// token is still required to resume.
+const SESSION_KEY = 'miori_gateway_session';
+
+void (async () => {
+  try {
+    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    if (!raw || lastSession) return;
+    const s = JSON.parse(raw) as { id?: string; seq?: number | null };
+    if (s?.id) lastSession = { id: s.id, seq: typeof s.seq === 'number' ? s.seq : null };
+  } catch {
+    /* no snapshot, or unreadable — just identify */
+  }
+})();
+
+/** The `start` frame, carrying the remembered session so a freshly (re)loaded
+ * page can resume rather than identify. The page ignores it when it still has
+ * its own session, so a live page is never overwritten by a stale copy. */
+function startMessage(token: string, activity: PresenceActivity): object {
+  return {
+    t: 'start',
+    token,
+    activity,
+    ...(lastSession ? { sessionId: lastSession.id, seq: lastSession.seq } : {}),
+  };
+}
 
 function drain() {
   if (!pushImpl || !bridgeReady || !outbox.length) return;
@@ -174,8 +212,9 @@ function emit(activity: PresenceActivity, sig: string) {
   sent.push(Date.now());
   lastOp3At = Date.now();
   // Always a full 'start': the page needs the token when the socket is not up
-  // yet, and it opens the socket itself when it is.
-  push({ t: 'start', token: desired.token, activity });
+  // yet, and it opens the socket itself when it is. Carries the remembered
+  // session so a re-created page re-attaches instead of identifying.
+  push(startMessage(desired.token, activity));
 }
 
 function scheduleOp3(activity: PresenceActivity, sig: string, gap: number) {
@@ -209,9 +248,10 @@ export function gatewayHint(s: GatewayStatus): string {
     state = s.lastCode != null ? `Disconnected (code ${s.lastCode})` : 'Disconnected';
   } else if (s.phase === 'ready') {
     state = 'Connected';
-  } else if (s.phase === 'socket-open' || s.phase === 'hello' || s.phase === 'identified') {
-    // 'identified' = IDENTIFY sent, READY dispatch not yet received — the
-    // transport's `ready` flag is still false here, so the badge stays
+  } else if (s.phase === 'socket-open' || s.phase === 'hello' || s.phase === 'identified' || s.phase === 'resuming') {
+    // 'identified' = IDENTIFY sent, READY dispatch not yet received. 'resuming'
+    // = RESUME sent, RESUMED not yet received. Either way the handshake is in
+    // flight and the transport's `ready` flag is still false, so the badge stays
     // "Connecting" and the hint must not claim "Connected" ahead of it.
     state = 'Authenticating…';
   } else if (s.phase === 'connecting') {
@@ -231,6 +271,7 @@ export function gatewayBadge(s: GatewayStatus): { label: string; tone: GatewayTo
   if (s.ready) return { label: 'Ready', tone: 'ready' };
   const connecting =
     s.phase === 'connecting' || s.phase === 'socket-open' || s.phase === 'hello' || s.phase === 'identified' ||
+    s.phase === 'resuming' ||
     (s.phase === 'idle' && !!s.lastStatus);
   return connecting ? { label: 'Connecting', tone: 'connecting' } : { label: 'Off', tone: 'off' };
 }
@@ -256,18 +297,21 @@ export function _registerPush(fn: ((msg: string) => void) | null) {
   // Wait for the page's wv-ready before sending (injects get dropped before).
 }
 
-/** Events from the hidden view: {kind:'phase',...} or {kind:'wv-ready'}. */
+/** Events from the hidden view: {kind:'phase',...}, {kind:'session',...} or
+ * {kind:'wv-ready'}. */
 export function _onGatewayEvent(ev: {
   kind: string;
   phase?: string;
   code?: number | null;
   error?: string;
+  sessionId?: string;
+  seq?: number | null;
 }) {
   if (ev.kind === 'wv-ready') {
     bridgeReady = true;
     if (desired && pushImpl) {
       try {
-        pushImpl(JSON.stringify({ t: 'start', token: desired.token, activity: desired.activity }));
+        pushImpl(JSON.stringify(startMessage(desired.token, desired.activity)));
       } catch {
         /* ignore */
       }
@@ -275,10 +319,22 @@ export function _onGatewayEvent(ev: {
     drain();
     return;
   }
+  if (ev.kind === 'session') {
+    // The page's live Discord session identity, remembered OUTSIDE the page.
+    // Android can kill the WebView renderer (in-memory copy is enough) or the
+    // whole app (the persisted copy is what survives). Either way a fresh page
+    // must RESUME this session rather than IDENTIFY a second one, which is what
+    // shows the account two activity cards at once.
+    if (ev.sessionId) {
+      lastSession = { id: ev.sessionId, seq: typeof ev.seq === 'number' ? ev.seq : null };
+      void AsyncStorage.setItem(SESSION_KEY, JSON.stringify(lastSession)).catch(() => {});
+    }
+    return;
+  }
   if (ev.kind === 'phase' && ev.phase) {
     const p = ev.phase;
     const max = status.phase.split(' → ')[0];
-    const order = ['idle', 'connecting', 'socket-open', 'hello', 'identified', 'ready'];
+    const order = ['idle', 'connecting', 'socket-open', 'hello', 'identified', 'resuming', 'ready'];
     const best = Math.max(order.indexOf(max), order.indexOf(p)) >= 0
       ? order[Math.max(order.indexOf(max), order.indexOf(p))]
       : p;

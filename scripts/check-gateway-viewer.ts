@@ -77,9 +77,51 @@ _onGatewayEvent({ kind: 'phase', phase: 'hello' });
 _onGatewayEvent({ kind: 'phase', phase: 'ready' });
 check('10. reconnected', 'Connected · sending: dnd', 'Ready', 'ready');
 
+// 6b. The reconnect that RESUMES the same session (the one-RPC path). Always
+//     preceded by the 'closed' of the socket that dropped; the row must then
+//     read as a handshake in flight, never the red "Off" the raw phase implies.
+_onGatewayEvent({ kind: 'phase', phase: 'closed', code: 1006 });
+_onGatewayEvent({ kind: 'phase', phase: 'connecting' });
+_onGatewayEvent({ kind: 'phase', phase: 'hello' });
+_onGatewayEvent({ kind: 'phase', phase: 'resuming' });
+check('10b. resuming same session', 'Authenticating… · sending: dnd', 'Connecting', 'connecting');
+_onGatewayEvent({ kind: 'phase', phase: 'ready' });
+check('10c. resumed', 'Connected · sending: dnd', 'Ready', 'ready');
+
 // 7. Presence off — full reset.
 gatewayStop();
 check('11. gatewayStop', 'Off', 'Off', 'off');
+
+// --- one-session invariant --------------------------------------------------
+// The hidden page reports its live Discord session; RN must remember it and
+// hand it back to a page that RELOADS (Android kills the WebView renderer), so
+// the new page RESUMEs that same session instead of IDENTIFYing a fresh one.
+// A second IDENTIFY while Discord still holds the old session resumable is
+// exactly what put TWO activity cards on the account at once.
+function checkRaw(label: string, cond: boolean, detail = '') {
+  if (cond) console.log(`  ok   ${label}`);
+  else {
+    failures++;
+    console.log(`  FAIL ${label}${detail ? ` — ${detail}` : ''}`);
+  }
+}
+
+const pushes: string[] = [];
+_registerPush((m) => pushes.push(m));
+gatewayStart('tok', { name: 'Miori', type: 0, details: 'Browsing Miori', startTimestamp: Date.now(), tier: 'screen' });
+_onGatewayEvent({ kind: 'session', sessionId: 'sess-1', seq: 42 });
+// A reloaded page announces itself; RN answers with the start frame synchronously.
+_onGatewayEvent({ kind: 'wv-ready' });
+const reloadStart = JSON.parse(pushes[pushes.length - 1] ?? '{}') as {
+  t?: string;
+  sessionId?: string;
+  seq?: number;
+};
+checkRaw(
+  'a reloaded page is handed the remembered session',
+  reloadStart.t === 'start' && reloadStart.sessionId === 'sess-1' && reloadStart.seq === 42,
+  JSON.stringify(reloadStart)
+);
 
 console.log(failures ? `\n${failures} failed\n` : '\nGateway viewer battery passed.\n');
 process.exit(failures ? 1 : 0);

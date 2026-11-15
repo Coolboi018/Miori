@@ -55,13 +55,13 @@ import { router } from 'expo-router';
  * same tile, deliberately, twice inside 600ms opens it once. That is the
  * cheapest possible wrong answer — the screen is already open.
  */
-// Bumped from 600 to 2000: 600 absorbed rapid double-taps but a slow render
-// (cold cache, busy JS thread) can leave the user staring at the previous
-// screen for >600ms, after which a second tap pushed a duplicate. 2000 covers
-// the "nothing happened, tap again" case. Cost: the same tile tapped twice
-// within 2s opens once — the screen is already open, so that is the right
-// answer. A different destination is never blocked (key differs).
-const DEDUPE_MS = 2000;
+// Bumped 600 -> 4000: a slow render (cold cache, busy JS thread) can leave the
+// user staring at the previous screen long enough to tap again, which used to
+// push a duplicate. 4000 covers the "nothing happened, tap again" case. Cost:
+// the same tile tapped twice within 4s opens once — the screen is already
+// open, so that is the right answer. A different destination is never blocked
+// (key differs).
+const DEDUPE_MS = 4000;
 
 /** The last destination that was pushed, and when. */
 let lastKey: string | null = null;

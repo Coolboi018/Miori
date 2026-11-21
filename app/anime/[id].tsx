@@ -416,6 +416,24 @@ export default function AnimeDetailScreen() {
     }, [])
   );
 
+  // Refresh resume progress when returning from the player (or anywhere else).
+  // `loadPositions` only ran on mount before, so a position saved mid-watch
+  // never reached this screen and the row stayed at 0m. Re-reading on focus
+  // picks up whatever the player persisted.
+  const firstPositionsFocusRef = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstPositionsFocusRef.current) {
+        firstPositionsFocusRef.current = false;
+        return;
+      }
+      let live = true;
+      loadPositions(animeId).then((p) => live && setPositions(p));
+      return () => {
+        live = false;
+      };
+    }, [animeId])
+  );
   const openEpisode = useCallback(
     (ep: number) => {
       // Guarded — see `lib/nav/pushOnce.ts`. This CTA and the episode tiles are

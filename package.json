@@ -1,7 +1,7 @@
 {
   "name": "miori",
   "main": "expo-router/entry",
-  "version": "1.0.0",
+  "version": "1.0.6",
   "dependencies": {
     "@expo/ui": "~58.0.23",
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -22,6 +22,7 @@
     "expo-linear-gradient": "~58.0.3",
     "expo-linking": "~58.0.14",
     "expo-navigation-bar": "~58.0.4",
+    "expo-network": "~58.0.5",
     "expo-router": "~58.0.26",
     "expo-secure-store": "~58.0.2",
     "expo-splash-screen": "~58.0.11",
@@ -65,9 +66,11 @@
     "check:health": "npx tsx scripts/check-player-health.ts",
     "check:failover": "npx tsx scripts/check-failover-budget.ts",
     "check:srcpref": "npx tsx scripts/check-source-pref.ts",
+    "check:replay": "npx tsx scripts/check-replay.ts",
     "check:updates": "npx tsx scripts/check-updates.ts",
     "check:scrub": "npx tsx scripts/check-player-scrub.ts",
     "check:subs": "npx tsx scripts/check-subtitles.ts",
+    "check:network": "npx tsx scripts/check-network.ts",
     "check:motion": "npx tsx scripts/check-sweep-spans.ts && npx tsx scripts/check-crossfade.ts"
   },
   "private": true

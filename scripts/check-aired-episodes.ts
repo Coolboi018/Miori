@@ -408,6 +408,32 @@ function main() {
     nextPlayableEpisode(0, finished) === null && nextPlayableEpisode(NaN, finished) === null
   );
 
+  // --- the PLAYER must ask the same question --------------------------------
+  // 21 Nov report: "the next button is not fading" on a still-airing show. The
+  // transport asked `epNum < totalEps` — the SEASON total — while the countdown
+  // asked `nextPlayableEpisode`, so ⏭ stayed white on the last released episode
+  // and tapping it resolved an unaired episode into an error card mid-binge.
+  // One rule, everywhere the question is asked.
+  const player = readFile(`${root()}/components/player/fullscreen/PlayerScreen.tsx`, 'utf8');
+  check(
+    'the transport next button answers to the aired rule, not the season total',
+    /const nextAired = nextPlayableEpisode\(epNum, mediaDetail \?\? undefined\)/.test(player) &&
+      /hasNext=\{nextAired != null\}/.test(player),
+    '⏭ dims a release late or not at all'
+  );
+  check(
+    '…and onNext refuses an episode that has not aired',
+    /if \(nextAired != null\) onPickEpisode\(nextAired\)/.test(player),
+    'a tap can still resolve into an unaired episode'
+  );
+  check(
+    'the 5s card can only be queued when something is actually ahead',
+    /const next = autoAdvanceRef\.current;[\s\S]{0,600}if \(next != null\) \{[\s\S]{0,600}setUpNext\(next\)/.test(
+      player
+    ),
+    'the countdown can fire with nothing ahead of the viewer'
+  );
+
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');
   process.exit(failures ? 1 : 0);
 }

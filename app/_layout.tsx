@@ -1,5 +1,5 @@
 import { useFonts } from 'expo-font';
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useNavigationContainerRef } from 'expo-router';
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useNavigationContainerRef, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
 import { AppState, Platform } from 'react-native';
@@ -20,6 +20,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { GatewayView } from '@/components/presence/GatewayView';
 import { ListSheetHost } from '@/components/ui/ListSheetHost';
 import { CharacterSheetHost } from '@/components/ui/CharacterSheetHost';
+import { NetworkBanner } from '@/components/ui/NetworkBanner';
 import { UpdatePrompt } from '@/components/updates/UpdatePrompt';
 import { AUTO_CHECK_DELAY_MS, checkForUpdate } from '@/lib/updates/store';
 import { SPLASH } from '@/lib/ui/splash';
@@ -34,9 +35,10 @@ import {
   syncExtensions,
 } from '@/lib/extensions/registry';
 import { refreshUserId } from '@/lib/auth/session';
-import { dehydrateOptions, hydrateOptions, queryClient, refetchStaleOnForeground, refreshUserListOnForeground } from '@/lib/query/client';
+import { dehydrateOptions, hydrateOptions, queryClient, bindQueryOnlineManager, refetchStaleOnForeground, refreshUserListOnForeground } from '@/lib/query/client';
 import { persister, flushPersistedCache } from '@/lib/query/persister';
 import { startWarmup } from '@/lib/query/prefetch';
+import { initNetworkStatus } from '@/lib/net/network';
 
 /**
  * DO NOT CALL `enableFreeze()`.
@@ -62,9 +64,10 @@ import { startWarmup } from '@/lib/query/prefetch';
  */
 
 export {
-  // Catch any errors thrown by the Layout component.
-  ErrorBoundary,
-} from 'expo-router';
+  // Catch any errors thrown by the Layout component. The custom boundary has
+  // two real exits (retry / home) instead of the library's stack trace.
+  RootErrorBoundary as ErrorBoundary,
+} from '@/components/ui/RootErrorBoundary';
 
 export const unstable_settings = {
   // Deep-linking or reloading straight onto a deeper route (e.g. `/anime/123`,
@@ -178,21 +181,30 @@ export default function RootLayout() {
       });
       if (Platform.OS === 'android') {
         const profile = PLAYER_CACHES.find((item) => item.key === readSetting('player.cache'));
+        // `off` is a mode, not a size. Zero is not a valid limit for the native
+        // setter, so the call is skipped entirely and the clear below is what
+        // makes the choice real on this launch: `PlayerScreen` also stops
+        // passing `useCaching`, so nothing new reaches the disk afterwards.
+        const cachingOff = profile?.key === 'off';
         let sizeApplied = false;
-        try {
-          await setVideoCacheSizeAsync(profile?.bytes ?? PLAYER_CACHES[0].bytes);
+        if (cachingOff) {
           sizeApplied = true;
-        } catch (cacheError) {
-          // A VideoPlayer existed when this ran. On a genuine cold start nothing
-          // creates one before the first screen renders, so this means the effect
-          // re-ran — a Fast Refresh remount is the likely cause, which is a dev
-          // affordance rather than a bug in the app.
-          if (__DEV__) {
-            console.warn(
-              '[player] cache size NOT applied: a VideoPlayer was already alive. ' +
-                'The limit is persistent, so the previous one stands until next launch.',
-              cacheError
-            );
+        } else {
+          try {
+            await setVideoCacheSizeAsync(profile?.bytes ?? PLAYER_CACHES[0].bytes);
+            sizeApplied = true;
+          } catch (cacheError) {
+            // A VideoPlayer existed when this ran. On a genuine cold start nothing
+            // creates one before the first screen renders, so this means the effect
+            // re-ran — a Fast Refresh remount is the likely cause, which is a dev
+            // affordance rather than a bug in the app.
+            if (__DEV__) {
+              console.warn(
+                '[player] cache size NOT applied: a VideoPlayer was already alive. ' +
+                  'The limit is persistent, so the previous one stands until next launch.',
+                cacheError
+              );
+            }
           }
         }
         if (sizeApplied) {
@@ -226,6 +238,24 @@ export default function RootLayout() {
    */
   useEffect(() => {
     void refreshUserId();
+  }, []);
+
+  /**
+   * CONNECTIVITY, ONCE, BEFORE THE FIRST SCREEN'S REQUESTS.
+   *
+   * `initNetworkStatus` does a one-shot native read and then listens for
+   * changes; `bindQueryOnlineManager` teaches React Query to pause and resume
+   * on those changes. Both are started here, while the splash is still up, so
+   * the first home query is not fired into a radio that is already known to be
+   * off.
+   *
+   * The subscription is owned by this effect rather than left at module scope:
+   * on Fast Refresh the cleanup prevents a second listener stacking, which is
+   * the same discipline `stopNetworkStatus` exists for.
+   */
+  useEffect(() => {
+    void initNetworkStatus();
+    return bindQueryOnlineManager();
   }, []);
 
   /**
@@ -357,6 +387,13 @@ function useForegroundRefresh(): void {
 function RootLayoutNav() {
   const colorScheme = useColorScheme();
   useForegroundRefresh();
+  /**
+   * The player is landscape and edge-to-edge, and owns its own offline pill.
+   * A global top banner there would sit on the top bar (or under the notch),
+   * so the two messages are split by route rather than stacked.
+   */
+  const pathname = usePathname();
+  const inPlayer = pathname?.startsWith('/watch/') ?? false;
 
   /**
    * HAND THE NAVIGATION GUARD THE LIVE CONTAINER.
@@ -505,6 +542,10 @@ function RootLayoutNav() {
         <Stack.Screen name="login" options={{ title: 'AniList login', headerShown: false }} />
         <Stack.Screen name="discord-login" options={{ title: 'Discord login', headerShown: false }} />
       </Stack>
+      {/* A single, non-blocking "No connection" pill. Above the Stack so it
+          survives a route change, hidden on the player where its own pill is
+          the one that fits the landscape chrome. */}
+      {inPlayer ? null : <NetworkBanner />}
       {/* "A screen is on its way." One host for the whole app, above the Stack
           so it survives the screen change it is reporting on — and drawn on
           the UI thread, so it keeps moving while the JS thread commits the

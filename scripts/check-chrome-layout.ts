@@ -126,9 +126,9 @@ check(
 );
 
 check(
-  'the toast is anchored to the measured bar, unconditionally',
-  /bottom:\s*barHeight \+ 14/.test(screenSrc),
-  'a toast that drops when the chrome hides arrives and leaves under the eye'
+  'the toast is gone from the player (no transient note overlay)',
+  !/styles\.note\b/.test(screenSrc) && !/\bsetNote\b/.test(screenSrc),
+  'the downgrade toast was removed on purpose; a thin buffer is not a reason to flash a message'
 );
 
 check(
@@ -157,7 +157,7 @@ const bottomBarDecl = /const bottomBarUp =([^;]+);/.exec(screenSrc)?.[1] ?? '';
 check(
   'the bottom bar stays mounted while a menu is open',
   bottomBarDecl.length > 0 &&
-    /\bshowControls\b/.test(bottomBarDecl) &&
+    /\bvisible\b/.test(bottomBarDecl) &&
     /\blocked\b/.test(bottomBarDecl) &&
     /\bpanelOpen\b/.test(bottomBarDecl),
   'tapping a trigger should raise a menu, not delete the trigger'

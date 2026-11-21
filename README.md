@@ -38,21 +38,21 @@ Miori supports pluggable extensions. To add an extension, just provide the **Git
 - **Official extensions repo:** <https://github.com/Coolboi018/Miori-Extensions>
 - Extensions are loaded dynamically — no app update needed to add new sources
 
-> *Extensions add extra streaming sources (e.g., direct links, other anime APIs). The core Anilist catalog and login are built into the app and updated via app updates, not extensions.*
+> _Extensions add extra streaming sources (e.g., direct links, other anime APIs). The core Anilist catalog and login are built into the app and updated via app updates, not extensions._
 
 ---
 
 ## 🛠️ Tech Stack
 
-| Layer | Technology |
-|-------|-----------|
-| **Framework** | Expo (React Native) |
-| **Language** | TypeScript |
-| **Navigation** | Expo Router |
-| **State Management** | React Query |
-| **Styling** | React Native Components + Custom CSS |
-| **Extensions** | Custom module system (loadable from Git repos) |
-| **Build/Release** | EAS (Expo Application Services) |
+| Layer                | Technology                                     |
+| -------------------- | ---------------------------------------------- |
+| **Framework**        | Expo (React Native)                            |
+| **Language**         | TypeScript                                     |
+| **Navigation**       | Expo Router                                    |
+| **State Management** | React Query                                    |
+| **Styling**          | React Native Components + Custom CSS           |
+| **Extensions**       | Custom module system (loadable from Git repos) |
+| **Build/Release**    | EAS (Expo Application Services)                |
 
 ---
 
@@ -90,11 +90,11 @@ If you want to add a custom extension to Miori:
 
 ## 📸 Screenshots
 
-| Light Mode | Dark Mode |
-|------------|-----------|
+| Light Mode                                                                  | Dark Mode                                                                   |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | <img src="https://github.com/user-attachments/assets/example1" width="300"> | <img src="https://github.com/user-attachments/assets/example2" width="300"> |
 
-*(Add your own screenshots by replacing the URLs with actual image paths in your repo.)*
+_(Add your own screenshots by replacing the URLs with actual image paths in your repo.)_
 
 ---
 
@@ -106,7 +106,7 @@ If you want to add a custom extension to Miori:
 4. Push (`git push origin feature/xyz`)
 5. Open a Pull Request
 
-> *Please keep the extension system modular and avoid committing sensitive keys/secrets.*
+> _Please keep the extension system modular and avoid committing sensitive keys/secrets._
 
 ---
 
@@ -126,4 +126,4 @@ Copyright (c) 2026 CoolBoi018
 
 ---
 
-*Built with ❤️ using Expo and React Native.*
+_Built with ❤️ using Expo and React Native._

@@ -41,27 +41,35 @@ const key = (animeId: number) => `miori:srcPref:${animeId}`;
  * mirrors reordered), and the memory's unit of truth is "this extension
  * played for me", not "row 3 played for me".
  *
- * `defaultExtId` — the GLOBAL default source (`player.defaultSource`) — takes
- * priority over the per-anime memory when it is given: a setting the viewer
- * typed into Settings is a stated preference, and the memory is a learned
- * one; without this ordering, one episode watched anywhere else would quietly
- * overwrite the global default through the frame-render save and the setting
- * would never stick. It is still a preference, not a requirement: an
- * extension that did not answer this resolve falls through to the memory and
- * then the ranked top, so a default never costs a watchable episode.
+ * `defaultExtId` — the GLOBAL default source (`player.defaultSource`) — is the
+ * LAST resort before the ranked top, NOT the first. It used to outrank the
+ * memory, and the 21 Nov report is why that was wrong: a viewer watching on
+ * Mega backed out to the details page and came straight back, and the player
+ * opened on the Settings default (filmu) again — a guess typed into Settings
+ * once, possibly months and several providers ago, beating the source that
+ * had rendered a frame ten seconds earlier. Real players resume where you
+ * were.
+ *
+ * The precedence is now: PROOF (the extension that actually played for this
+ * anime, written by the frame rule above) → the stated default → the ranked
+ * top. Both remain preferences, not requirements: an extension that did not
+ * answer this resolve falls through to the next rung, so neither a stale
+ * memory nor a stale default can cost a watchable episode.
  */
 export function pickStartIndex<T extends { extId?: string }>(
   sources: T[],
   prefExtId: string | null,
   defaultExtId?: string | null
 ): number {
-  if (defaultExtId) {
+  if (prefExtId) {
+    const i = sources.findIndex((s) => s.extId === prefExtId);
+    if (i >= 0) return i;
+  }
+  if (defaultExtId && defaultExtId !== 'auto') {
     const i = sources.findIndex((s) => s.extId === defaultExtId);
     if (i >= 0) return i;
   }
-  if (!prefExtId) return 0;
-  const i = sources.findIndex((s) => s.extId === prefExtId);
-  return i >= 0 ? i : 0;
+  return 0;
 }
 
 /** The remembered extension id for this anime, or null. */

@@ -697,6 +697,27 @@ console.log('\n[player wiring]');
     .filter(([, src]) => /findCueAt/.test(src))
     .map(([f]) => f);
   check('there is exactly one cue lookup, in the lib', dupes.length === 0, dupes.join(', '));
+
+  // THE RETURN TRIP, SUBTITLE HALF (21 Nov). Every source reload hands over a
+  // fresh `tracks` array (by design — see the handover check above), which used
+  // to re-download and re-parse the same .vtt. The track now goes through
+  // `cueLoad`, and every sampler that turns a playhead into a line goes through
+  // the shared placeholder clock instead of calling `publishCue` itself.
+  check(
+    'the cue fetch goes through the cache, so a reload does not re-download the track',
+    /cueLoad\(\s*t\.url/.test(screen),
+    'found no cueLoad(t.url …) in the player'
+  );
+  check(
+    'every cue sampler shares the placeholder-clock rule',
+    /cueLookupTime\(/.test(screen) && !/publishCue\(\s*cueAtSync/.test(screen),
+    'a sampler still publishes a raw cueAtSync lookup'
+  );
+  check(
+    'the seek and the resume each publish their own target, so a jump does not wait for the tick',
+    (screen.match(/showCueAt\(/g) ?? []).length >= 6,
+    `${(screen.match(/showCueAt\(/g) ?? []).length} call sites`
+  );
 }
 
 {
@@ -742,6 +763,6 @@ console.log('\n[player wiring]');
 console.log(
   failures
     ? `\n${failures} failed\n`
-    : '\nall passed \u2014 the default overlay is unchanged, cues do not flicker at a boundary, and a subtitle pick survives a source reload\n'
+    : '\nall passed \u2014 the default overlay is unchanged, cues do not flicker at a boundary, a subtitle pick survives a source reload, and the track is not re-downloaded for one\n'
 );
 process.exit(failures ? 1 : 0);

@@ -46,14 +46,11 @@ import {
   bufferAhead,
   healthProfile,
   MOVE_EPS,
-  nextLowerRung,
   noteInterruption,
   noteSeek,
   observeHealth,
-  RECOVER_WINDOW,
   resetHealth,
   SEEK_STALL_MS,
-  STARVE_WINDOW,
   STALL_MS,
   type HealthProfile,
   type HealthSample,
@@ -128,15 +125,11 @@ interface Step {
   mutateAs?:
     | 'unknown-is-zero'
     | 'ignore-playing'
-    | 'symmetric-recovery'
-    | 'no-recovery-window'
-    | 'naive-adaptive'
     | 'no-seek-grace';
 }
 
 interface Run {
   kinds: string[];
-  drops: number;
   last: HealthState;
 }
 
@@ -159,8 +152,6 @@ function run(
   let state = start ?? resetHealth(0);
   let t = 0;
   const kinds: string[] = [];
-  let drops = 0;
-
   for (const raw of steps) {
     const step = mode === 'mutate' && mutation ? { ...raw, mutateAs: mutation } : raw;
     t += step.dt;
@@ -192,52 +183,6 @@ function run(
           verdict = observeHealth(state, forced, profile);
           break;
         }
-        // TRAP 4, mutated: symmetric thresholds. Forget the dropped tier the
-        // instant the buffer crosses back over the starve line, which is how a
-        // marginal-but-playable connection walks the whole ladder.
-        case 'symmetric-recovery': {
-          const relaxed: HealthProfile = { ...profile, recoverFloor: profile.starveFloor };
-          verdict = observeHealth(state, sample, relaxed);
-          break;
-        }
-        // TRAP 4, mutated: keep the asymmetric threshold but forget immediately
-        // on recovery, dropping `RECOVER_WINDOW`. The subtler of the two, and
-        // the one that still looks correct in a code review.
-        case 'no-recovery-window': {
-          if (
-            sample.buffered >= 0 &&
-            sample.buffered - sample.position >= profile.recoverFloor
-          ) {
-            verdict = observeHealth({ ...state, dropped: false }, sample, profile);
-          }
-          break;
-        }
-        // Both halves of the naive adaptive monitor at once: act on a single
-        // below-floor sample and forget on a single comfortable one. Together
-        // they turn a flapping connection into a ladder walk — which is the
-        // thing trap 4 exists to prevent, shown here with both screws out.
-        case 'naive-adaptive': {
-          const naiveState: HealthState = {
-            ...state,
-            dropped: false,
-            starvingSince: null,
-          };
-          if (sample.buffered >= 0) {
-            const ahead = sample.buffered - sample.position;
-            verdict = observeHealth(
-              ahead < profile.starveFloor
-                ? { ...naiveState, starvingSince: 0 }
-                : naiveState,
-              sample,
-              profile
-            );
-            // Force the drop on a single sample rather than a sustained run.
-            if (ahead < profile.starveFloor && !verdict.dropTier) {
-              verdict = { ...verdict, dropTier: true, state: { ...verdict.state, dropped: true } };
-            }
-          }
-          break;
-        }
         // The seek's extended window, removed. Our own forward-skip then reads
         // as a dead source and spends a failover round on a healthy stream.
         case 'no-seek-grace': {
@@ -250,10 +195,9 @@ function run(
 
     state = verdict.state;
     kinds.push(verdict.health.kind);
-    if (verdict.dropTier) drops++;
   }
 
-  return { kinds, drops, last: state };
+  return { kinds, last: state };
 }
 
 /** A healthy stream: playing, one second of progress per second, healthy ahead. */
@@ -279,9 +223,9 @@ check(
   `got ${run(DEFAULT, healthy(10)).kinds[9]}`
 );
 check(
-  'a healthy stream never drops a tier',
-  run(DEFAULT, healthy(120)).drops === 0,
-  `${run(DEFAULT, healthy(120)).drops} drops in two minutes of good playback`
+  'a healthy stream never reports starving',
+  !run(DEFAULT, healthy(120)).kinds.includes('starving'),
+  `got ${[...new Set(run(DEFAULT, healthy(120)).kinds)].join(', ')}`
 );
 
 // Sub-MOVE_EPS jitter is not movement. A paused or ended item produces
@@ -340,14 +284,14 @@ check(
     `got ${[...new Set(correct.kinds)].join(', ')}`
   );
   check(
-    '…and no tier is dropped on unknowable evidence',
-    correct.drops === 0,
-    `${correct.drops} drops`
+    '…and an unknowable buffer never reports `starving`',
+    !correct.kinds.includes('starving'),
+    `got ${[...new Set(correct.kinds)].join(', ')}`
   );
   check(
-    'MUTATION "unknown is zero" DOES drop a tier here',
-    mutated.drops > 0,
-    'if this is 0 the check cannot see the bug it exists to catch'
+    'MUTATION "unknown is zero" DOES report `starving` here',
+    mutated.kinds.includes('starving'),
+    'if this is false the check cannot see the bug it exists to catch'
   );
 }
 
@@ -464,12 +408,6 @@ console.log('\n4. trap 3 — backgrounding is not a dead stream\n');
     'the guard has to be the reason the first check passes'
   );
 
-  // …but the DECISIONS are kept. Forgetting a dropped tier on backgrounding is
-  // how a phone walks the ladder one app-switcher at a time.
-  check(
-    'an interruption does NOT forget a tier that was already dropped',
-    noteInterruption({ ...state, dropped: true }, 50_000).dropped === true
-  );
   check(
     '…but it does clear a starvation run from the connection we left',
     noteInterruption({ ...state, starvingSince: 1000 }, 50_000).starvingSince === null
@@ -587,17 +525,13 @@ console.log('\n5b. a starved app is not a dead stream\n');
   // And the decisions survive, exactly as they do across a backgrounding: a
   // starved stretch is not evidence about the connection.
   const starved = observeHealth(
-    { ...resetHealth(0), dropped: true, lastAt: 0 },
+    { ...resetHealth(0), lastAt: 0 },
     { position: 5, buffered: 40, status: 'readyToPlay', playing: true, at: 9_000 },
     DEFAULT
   );
   check(
-    'a starved sample does not forget a tier that was already dropped',
-    starved.state.dropped === true
-  );
-  check(
-    '…and it never asks for a downgrade or a failover',
-    starved.dropTier === false && starved.health.kind === 'unknown'
+    '…and it never asks for a failover',
+    starved.health.kind === 'unknown'
   );
 }
 
@@ -682,12 +616,14 @@ console.log('\n6. the seek grace\n');
 }
 
 // ---------------------------------------------------------------------------
-// 7. TRAP 4 — the downgrade must not thrash
+// 7. No automatic quality change (removed on purpose)
 // ---------------------------------------------------------------------------
-console.log('\n7. trap 4 — a downgrade that cannot walk the ladder\n');
+console.log('\n7. no auto-downgrade — the monitor reports, it does not act\n');
 
 {
-  // A connection that sits just below the floor, for a long time.
+  // A sustained thin buffer is reported as `starving`, and nothing more. The
+  // old auto-downgrade walked the ladder on this; it is gone, so the verdict
+  // never carries an action and the source list is never replaced by a timer.
   const starving: Step[] = Array.from({ length: 40 }, (_, i) => ({
     dt: 1000,
     position: 100 + i,
@@ -695,126 +631,13 @@ console.log('\n7. trap 4 — a downgrade that cannot walk the ladder\n');
   }));
   const run40 = run(DEFAULT, starving);
   check(
-    'a sustained thin buffer drops a tier',
-    run40.drops === 1,
-    `${run40.drops} drops`
+    'a sustained thin buffer reports `starving`',
+    run40.kinds.includes('starving'),
+    `got ${[...new Set(run40.kinds)].join(', ')}`
   );
   check(
-    '…and drops it only ONCE, however long it continues',
-    run40.drops === 1,
-    'one bad minute must not cost every rung of the ladder'
-  );
-
-  // The ladder walk. The first version of this section used a buffer
-  // OSCILLATING around the threshold and asserted it drops nothing — and it did
-  // drop nothing, under every rule, including the broken ones. The premise was
-  // wrong: a drop needs a SUSTAINED thin run, and an oscillation never provides
-  // one, so the scenario could not distinguish the rules at all.
-  //
-  // What actually walks a ladder is a connection that alternates between a long
-  // thin stretch (long enough to drop a tier) and a brief comfortable one (long
-  // enough to make a naive monitor believe it recovered). Realistic on a train,
-  // or a phone moving between cells. That is what this drives.
-  const cycle = (thinSeconds: number, deepSeconds: number, rounds: number): Step[] => {
-    const out: Step[] = [];
-    let pos = 100;
-    for (let r = 0; r < rounds; r++) {
-      for (let i = 0; i < thinSeconds; i++) {
-        out.push({ dt: 1000, position: pos++, ahead: 1 });
-      }
-      for (let i = 0; i < deepSeconds; i++) {
-        out.push({ dt: 1000, position: pos++, ahead: DEFAULT.recoverFloor + 5 });
-      }
-    }
-    return out;
-  };
-
-  const flapping = cycle(15, 5, 4);
-  const correctFlap = run(DEFAULT, flapping);
-  check(
-    'four rounds of thin-then-briefly-comfortable drop ONE tier in total',
-    correctFlap.drops === 1,
-    `${correctFlap.drops} drops — the ladder walk, and it looks like working software`
-  );
-  check(
-    'MUTATION "no recovery window" DOES walk the ladder',
-    run(DEFAULT, flapping, 'mutate', null, 'no-recovery-window').drops > 1,
-    `${run(DEFAULT, flapping, 'mutate', null, 'no-recovery-window').drops} drops — if this is 1 the check cannot see trap 4`
-  );
-  check(
-    'MUTATION "naive adaptive" (act instantly, forget instantly) is worse still',
-    run(DEFAULT, flapping, 'mutate', null, 'naive-adaptive').drops >=
-      run(DEFAULT, flapping, 'mutate', null, 'no-recovery-window').drops
-  );
-
-  // A buffer sitting just above the starve floor is NOT recovery. It is the
-  // same bad connection with one extra segment.
-  const boundaryFlap: Step[] = [
-    ...Array.from({ length: 20 }, (_, i) => ({ dt: 1000, position: 100 + i, ahead: 1 })),
-    ...Array.from({ length: 6 }, (_, i) => ({
-      dt: 1000,
-      position: 120 + i,
-      ahead: DEFAULT.starveFloor + 0.5,
-    })),
-    ...Array.from({ length: 20 }, (_, i) => ({ dt: 1000, position: 126 + i, ahead: 1 })),
-  ];
-  check(
-    'a buffer just above the starve floor does NOT count as recovery',
-    run(DEFAULT, boundaryFlap).drops === 1,
-    `${run(DEFAULT, boundaryFlap).drops} drops — the threshold asymmetry is what stops this, and RECOVER_WINDOW alone would not`
-  );
-
-  // After a drop, a brief recovery must NOT earn the tier back.
-  const dipAndRecover: Step[] = [
-    ...starving,
-    ...Array.from({ length: 5 }, (_, i) => ({
-      dt: 1000,
-      position: 140 + i,
-      ahead: DEFAULT.recoverFloor + 5,
-    })),
-    ...Array.from({ length: 20 }, (_, i) => ({
-      dt: 1000,
-      position: 145 + i,
-      ahead: 1,
-    })),
-  ];
-  check(
-    'a short recovery does NOT earn a dropped tier back',
-    run(DEFAULT, dipAndRecover).drops === 1,
-    `${run(DEFAULT, dipAndRecover).drops} drops`
-  );
-
-  // …but a long one does, so a genuinely second bad episode can still act.
-  const recoverLongEnough = Math.ceil(RECOVER_WINDOW / 1000) + 4;
-  const dipRecoverDip: Step[] = [
-    ...starving,
-    ...Array.from({ length: recoverLongEnough }, (_, i) => ({
-      dt: 1000,
-      position: 140 + i,
-      ahead: DEFAULT.recoverFloor + 5,
-    })),
-    ...Array.from({ length: 20 }, () => ({ dt: 1000, position: 200, ahead: 1 })),
-  ];
-  check(
-    'a sustained recovery DOES, so a second bad episode can still act',
-    run(DEFAULT, dipRecoverDip).drops === 2,
-    `${run(DEFAULT, dipRecoverDip).drops} drops — if this is 1 the flag is permanent and the monitor is deaf after one incident`
-  );
-
-  // Below the window, a recovery must not count at all.
-  const barelyEnough: Step[] = [
-    ...starving,
-    ...Array.from({ length: Math.ceil(RECOVER_WINDOW / 1000) - 2 }, (_, i) => ({
-      dt: 1000,
-      position: 140 + i,
-      ahead: DEFAULT.recoverFloor + 5,
-    })),
-    ...Array.from({ length: 20 }, () => ({ dt: 1000, position: 200, ahead: 1 })),
-  ];
-  check(
-    'a recovery one tick short of the window does not count',
-    run(DEFAULT, barelyEnough).drops === 1,
-    `${run(DEFAULT, barelyEnough).drops} drops`
+    '…and the verdict carries no drop action (no `dropTier` field)',
+    !('dropTier' in (observeHealth(resetHealth(0), { position: 1, buffered: 2, status: 'readyToPlay', playing: true, at: 1000 }, DEFAULT)))
   );
 }
 
@@ -826,14 +649,6 @@ console.log('\n8. the thresholds follow the setting the user chose\n');
 {
   // Every horizon the app can produce, plus the degenerate ones.
   const horizons = [15, 20, 30, 60, 0, -5, Number.NaN, 1e9];
-  check(
-    'recoverFloor is ALWAYS above starveFloor, at any horizon',
-    horizons.every((hz) => {
-      const p = healthProfile(hz);
-      return p.recoverFloor > p.starveFloor;
-    }),
-    'if these ever cross, a buffer oscillating between them either never drops a tier or drops one every pass'
-  );
   check(
     'a degenerate horizon cannot produce a zero threshold',
     horizons.every((hz) => healthProfile(hz).starveFloor >= 3),
@@ -849,56 +664,14 @@ console.log('\n8. the thresholds follow the setting the user chose\n');
   // sitting 8s ahead is healthy, and the same 8s on a High profile is not.
   const lowProfile = healthProfile(15);
   check(
-    '8s ahead on a Low profile is `ok`',
+    '8s ahead on a Low profile is ok',
     run(lowProfile, [{ dt: 1000, position: 100, ahead: 8 }]).kinds[0] === 'ok'
   );
   check(
-    '8s ahead on a High profile is `starving`',
+    '8s ahead on a High profile is starving',
     run(healthProfile(60), [{ dt: 1000, position: 100, ahead: 8 }]).kinds[0] === 'starving'
   );
-
-  // `STARVE_WINDOW` is what stops a momentary dip from costing a rung.
-  const momentary = run(
-    DEFAULT,
-    Array.from({ length: 20 }, (_, i) => ({
-      dt: 1000,
-      position: 100 + i,
-      ahead: i === 3 ? 0 : 40,
-    }))
-  );
-  check(
-    'a one-second dip does not drop a tier',
-    momentary.drops === 0,
-    `${momentary.drops} drops — STARVE_WINDOW (${STARVE_WINDOW / 1000}s) is not being applied`
-  );
 }
-
-// ---------------------------------------------------------------------------
-// 9. Picking the rung below
-// ---------------------------------------------------------------------------
-console.log('\n9. choosing which rung to drop to\n');
-
-const LADDER = ['1080p', '720p', '480p'];
-
-check('from the top it picks the next one down', nextLowerRung(LADDER, 1080) === '720p');
-check('from the middle it picks the next one down', nextLowerRung(LADDER, 720) === '480p');
-check('from the bottom there is nowhere to go', nextLowerRung(LADDER, 480) === null);
-check('a single-rung ladder has nowhere to go', nextLowerRung(['1080p'], 1080) === null);
-check('an empty ladder has nowhere to go', nextLowerRung([], 1080) === null);
-check(
-  'an unknown active rung steps down from the SECOND, not the top',
-  nextLowerRung(LADDER, null) === '720p',
-  'selecting the top of the ladder would RAISE quality during the incident meant to lower it — ExoPlayer ABR has already been adapting'
-);
-check(
-  'a height the ladder does not carry is treated as unknown',
-  nextLowerRung(LADDER, 360) === '720p'
-);
-check(
-  'a bitrate label carries no height and cannot match a resolution',
-  nextLowerRung(['1500k', '800k'], null) === '800k'
-);
-
 // ---------------------------------------------------------------------------
 // 10. Failure messages
 // ---------------------------------------------------------------------------

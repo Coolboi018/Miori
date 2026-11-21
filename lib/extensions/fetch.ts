@@ -15,6 +15,22 @@
 // So the body is read *inside* the helper, while the clock is still running.
 // Every call site goes through `fetchText` / `fetchJson` and gets a whole-exchange
 // deadline for free.
+//
+// RETRIES, AND WHY THEY LIVE IN `fetchText` RATHER THAN `fetchTimed`.
+// `fetchTimed` is also the primitive behind the HLS probe, where a non-2xx is a
+// VERDICT (drop the source) and a stalled master must be abandoned inside its
+// own small budget — retrying there would multiply a probe's cost and could
+// turn a dead source into a slow one. `fetchText`/`fetchJson` are the calls
+// that want a second chance: a CDN blip or one dropped packet should not become
+// "this episode failed". So the retry policy sits above the primitive, and the
+// TOTAL deadline is shared across attempts instead of each attempt getting a
+// fresh one — a 10s subtitle fetch cannot become 30s of spinner.
+
+import {
+  isOffline,
+  isOfflineError,
+  offlineError,
+} from '../net/connectivity';
 
 export interface TimedResponse {
   ok: boolean;
@@ -62,10 +78,91 @@ export async function fetchText(
   init?: RequestInit,
   label?: string
 ): Promise<string> {
-  const r = await fetchTimed(url, ms, init, label);
-  if (!r.ok) throw new Error(`${label ?? 'Request'} HTTP ${r.status}`);
-  return r.text;
+  const name = label ?? 'Request';
+  /** `ms` is the budget for the WHOLE operation, retries included. */
+  const deadline = Date.now() + Math.max(1, ms);
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+    // Checked every attempt, not only at the start: the radio can disappear
+    // between the first try and its retry, and a dead connection should fail
+    // with the offline sentence rather than a raw TypeError.
+    if (isOffline()) throw offlineError();
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error(`${name} timed out after ${ms}ms`);
+    }
+
+    let res: TimedResponse;
+    try {
+      res = await fetchTimed(url, Math.max(1, Math.round(remaining)), init, name);
+    } catch (e) {
+      if (isOffline()) throw offlineError();
+      lastError = e;
+      // A 4xx/parse failure will answer the same way again. Only a network
+      // shape or a deadline miss is worth another attempt.
+      if (attempt === RETRY_ATTEMPTS || !transientFailure(e)) throw e;
+      await retryPause(attempt, deadline);
+      continue;
+    }
+
+    if (res.ok) return res.text;
+
+    const httpError = new Error(`${name} HTTP ${res.status}`);
+    if (attempt === RETRY_ATTEMPTS || !transientStatus(res.status)) throw httpError;
+    lastError = httpError;
+    await retryPause(attempt, deadline);
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`${name} failed`);
 }
+
+/** One request plus two retries. */
+const RETRY_ATTEMPTS = 3;
+
+/** First backoff step. Doubles: 350ms, 700ms. */
+const RETRY_BASE_MS = 350;
+
+/** 408/425/429/5xx are the statuses where the same request can plausibly work. */
+function transientStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+/**
+ * Whether a thrown failure is worth repeating.
+ *
+ * The helper's own timeout is named, and React Native's `fetch` throws a bare
+ * `TypeError` when the socket never opened — those are the two shapes a retry
+ * can fix. A parse error cannot happen here (the body is still text), and a
+ * caller cancellation would not either (no caller passes a signal), so this is
+ * deliberately narrow rather than "retry anything".
+ */
+function transientFailure(e: unknown): boolean {
+  if (isOfflineError(e)) return false;
+  if (e instanceof TypeError) return true;
+  const message = e instanceof Error ? e.message : String(e ?? '');
+  return /timed out|network|fetch failed|econnreset|econnrefused|enotfound|eai_again|socket/i.test(
+    message
+  );
+}
+
+/**
+ * Wait out a backoff step, but never past the total deadline.
+ *
+ * Returning early is intentional: the next loop's `remaining` check turns an
+ * exhausted budget into the last real failure instead of sleeping on a request
+ * that can no longer be sent.
+ */
+async function retryPause(attempt: number, deadline: number): Promise<void> {
+  const budget = deadline - Date.now();
+  if (budget <= 0) return;
+  const wait = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), budget);
+  if (wait > 0) await new Promise<void>((resolve) => setTimeout(resolve, wait));
+}
+
 
 /**
  * `fetchText` + `JSON.parse`.

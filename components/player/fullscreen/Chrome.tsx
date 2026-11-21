@@ -20,6 +20,7 @@
 // straight through the art; moving them off the edge reads as dismissal.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useChromeVisible } from '@/lib/player/chromeVisibility';
 import type { VideoPlayer } from 'expo-video';
 import {
   Pressable,
@@ -34,8 +35,6 @@ import type { EdgeInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, {
   Easing,
-  FadeIn,
-  FadeOut,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -109,8 +108,7 @@ export const BOTTOM_BAR_H = 157;
  * (the user just asked for them) and unhurried to leave (nothing is being
  * gained by yanking them).
  */
-const CHROME_IN = FadeIn.duration(180);
-const CHROME_OUT = FadeOut.duration(140);
+// (removed unused fade constants)
 
 /**
  * Why the centre shows a bare ring.
@@ -142,7 +140,8 @@ export const TopBar = memo(function TopBar({
   onPip,
   pipAvailable,
   locked,
-  visible,
+  off,
+  // visibility comes from the external store, not a prop
   insets,
 }: {
   title: string;
@@ -161,19 +160,66 @@ export const TopBar = memo(function TopBar({
   onPip: () => void;
   pipAvailable: boolean;
   locked: boolean;
-  visible: boolean;
+  /**
+   * THE TRANSITION GATE (`PlayerScreen`'s `switchPending`).
+   *
+   * During an episode switch the overlay is not shown at all — no gradient, no
+   * title, no episodes/lock/settings icons — because every one of them still
+   * describes the episode being replaced, and a control that is about to be
+   * wrong is worse than no control. The one thing that survives is the BACK
+   * ARROW: a transition must never be a screen with no exit, and on iOS there is
+   * no hardware back to fall through to.
+   *
+   * It renders at the seat the full overlay's back button occupies — the same
+   * wrapper paddings, the same row padding, the same 22pt glyph — so the arrow
+   * does not move a pixel when the overlay fades back in around it.
+   */
+  off?: boolean;
+  // visibility from store
   /** Landscape puts the notch on a SIDE — see `PlayerScreen`'s `insets`. */
   insets: EdgeInsets;
 }) {
-  if (!visible) return null;
+  const visible = useChromeVisible();
+
   const subtitle = episodeLabel
     ? `Episode ${formatEpisodeNumber(episode)} · ${episodeLabel}`
     : `Episode ${formatEpisodeNumber(episode)}`;
 
+  if (off) {
+    return (
+      <View
+        style={[
+          styles.topWrap,
+          {
+            height: TOP_BAR_TOTAL + insets.top,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+            paddingTop: insets.top,
+          },
+        ]}
+        // `box-none`: the arrow is a target, the rest of the strip is not. A
+        // touch beside it belongs to the frame — which is inert during a
+        // transition anyway (the gesture surface is off) — not to an invisible
+        // overlay.
+        pointerEvents="box-none"
+      >
+        <View style={styles.topRow}>
+          {/* A DISC, not the overlay's bare glyph. The gradient that normally
+              carries that glyph's contrast left with the overlay, and the frame
+              underneath is whatever the episode happened to end on — a white
+              arrow on a bright frame is an invisible exit. Same 38pt box as
+              `iconButton`, so the arrow itself does not shift when the gradient
+              fades back in around it. */}
+          <View style={styles.gateBack}>
+            <IconButton icon="back" onPress={onBack} label="Back" />
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <Animated.View
-      entering={CHROME_IN}
-      exiting={CHROME_OUT}
       style={[
         styles.topWrap,
         {
@@ -186,9 +232,10 @@ export const TopBar = memo(function TopBar({
           paddingLeft: insets.left,
           paddingRight: insets.right,
           paddingTop: insets.top,
+          opacity: visible ? 1 : 0,
         },
       ]}
-      pointerEvents="box-none"
+      pointerEvents={visible ? 'box-none' : 'none'}
     >
       <LinearGradient
         colors={['rgba(0,0,0,0.85)', 'rgba(0,0,0,0.35)', 'rgba(0,0,0,0)']}
@@ -236,7 +283,7 @@ export const TopBar = memo(function TopBar({
 // ---------------------------------------------------------------------------
 
 export const CenterTransport = memo(function CenterTransport({
-  visible,
+  // visibility comes from the external store, not a prop
   playing,
   buffering,
   hasPrev,
@@ -244,8 +291,9 @@ export const CenterTransport = memo(function CenterTransport({
   onPlayPause,
   onPrev,
   onNext,
+  off,
 }: {
-  visible: boolean;
+  // visibility from store
   playing: boolean;
   buffering: boolean;
   hasPrev: boolean;
@@ -253,20 +301,31 @@ export const CenterTransport = memo(function CenterTransport({
   onPlayPause: () => void;
   onPrev: () => void;
   onNext: () => void;
+  /**
+   * The episode-transition gate (`PlayerScreen`'s `switchPending`). It removes
+   * the TRANSPORT only — never the ring. The ring is the transition's own
+   * feedback, and it has to stay on screen while the next episode resolves.
+   */
+  off?: boolean;
 }) {
+  const chromeVisible = useChromeVisible();
+  const visible = chromeVisible || buffering;
+
   // Buffering replaces the transport rather than sitting under it. See the
   // header: the button is useless mid-rebuffer and its presence suggests it is
   // not. The ring has no caption and no buffer readout — see the words
   // decision above the component.
   if (buffering) {
     return (
-      <Animated.View entering={CHROME_IN} exiting={CHROME_OUT} style={styles.centerBox} pointerEvents="box-none">
+      <Animated.View style={[styles.centerBox, { opacity: visible ? 1 : 0 }]} pointerEvents={visible ? 'box-none' : 'none'}>
         {/* Tappable: pausing a buffering video stops the fetch and clears the
             ring, exactly like YouTube/ExoPlayer where the center affordance is
             the control even while loading. Only the ring itself is the target —
             taps elsewhere still fall through to the gesture surface. */}
         <Pressable
-          onPress={onPlayPause}
+          // Still shown, but not a remote: pausing here would write the intent
+          // for the episode that is on its way and start it paused.
+          onPress={off ? undefined : onPlayPause}
           accessibilityRole="button"
           accessibilityLabel={playing ? 'Pause' : 'Play'}
           hitSlop={16}
@@ -277,11 +336,13 @@ export const CenterTransport = memo(function CenterTransport({
       </Animated.View>
     );
   }
-  if (!visible) return null;
+  // Past the ring (which the gate keeps), a transition gets no transport at
+  // all: ⏮ ▶ ⏭ still point at the episode being replaced.
+  if (off) return null;
 
   return (
-    <View style={styles.centerBox} pointerEvents="box-none">
-      <Animated.View entering={CHROME_IN} exiting={CHROME_OUT} style={styles.centerRow}>
+    <Animated.View style={[styles.centerBox, { opacity: visible ? 1 : 0 }]} pointerEvents={visible ? 'box-none' : 'none'}>
+      <Animated.View style={styles.centerRow}>
         <TransportButton
           icon="skipBack"
           onPress={onPrev}
@@ -306,7 +367,7 @@ export const CenterTransport = memo(function CenterTransport({
           size={34}
         />
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 });
 
@@ -352,7 +413,7 @@ const TransportButton = memo(function TransportButton({
 /** Buffering ring. Reanimated's spin, so it never competes with the JS thread —
  *  a spinner animated with `Animated` would run on exactly the thread that is
  *  busy decoding the frame it is sitting on top of. */
-const ActivityRing = memo(function ActivityRing() {
+export const ActivityRing = memo(function ActivityRing() {
   const rot = useSharedValue(0);
   useEffect(() => {
     rot.value = withRepeat(withTiming(1, { duration: 900, easing: Easing.linear }), -1, false);
@@ -443,7 +504,7 @@ const TriggerSlot = memo(function TriggerSlot({
 
 export const BottomBar = memo(function BottomBar({
   player,
-  visible,
+  // visibility comes from the external store, not a prop
   skip,
   onSeek,
   activeMenu,
@@ -463,9 +524,10 @@ export const BottomBar = memo(function BottomBar({
   position,
   positionKnown,
   onScrubActive,
+  off,
 }: {
   player: VideoPlayer;
-  visible: boolean;
+  // visibility from store
   skip: SkipWindow;
   /**
    * Commit a scrub. `null` means the bar could not tell where the viewer
@@ -484,6 +546,8 @@ export const BottomBar = memo(function BottomBar({
   muted: boolean;
   /** Bottom inset — the home indicator / gesture bar the row must clear. */
   insets: Pick<EdgeInsets, 'bottom' | 'left' | 'right'>;
+  /** The episode-transition gate — see `PlayerScreen`'s `switchPending`. */
+  off?: boolean;
   /** Reports this bar's real height, including the inset. See `BOTTOM_BAR_H`. */
   onMeasure?: (height: number) => void;
   /** Reports where each trigger sits, so a menu can open above its own button. */
@@ -518,6 +582,17 @@ export const BottomBar = memo(function BottomBar({
    */
   onScrubActive?: (active: boolean) => void;
 }) {
+  const chromeVisible = useChromeVisible();
+  /**
+   * The bar stays MOUNTED behind the gate. `barHeight` is a measurement this
+   * screen reads for the subtitle floor and the skip seat, and unmounting the
+   * bar would make both jump — for a control the viewer is not allowed to touch
+   * anyway. It goes invisible and touch-transparent instead: every chip here
+   * (timeline, speed, quality, source, subs) still describes the episode being
+   * replaced, so none of them may be pressed.
+   */
+  const visible = chromeVisible && !off;
+
   /**
    * Only the parts of the timeline that change slowly are React state now.
    *
@@ -590,12 +665,8 @@ export const BottomBar = memo(function BottomBar({
     return () => subscription.remove();
   }, [player, position]);
 
-  if (!visible) return null;
-
   return (
     <Animated.View
-      entering={CHROME_IN}
-      exiting={CHROME_OUT}
       onLayout={(e) => {
         const h = e.nativeEvent.layout.height;
         // The gradient reaches the home indicator because the INSET is padding on
@@ -609,9 +680,10 @@ export const BottomBar = memo(function BottomBar({
           paddingLeft: insets.left,
           paddingRight: insets.right,
           paddingBottom: insets.bottom,
+          opacity: visible ? 1 : 0,
         },
       ]}
-      pointerEvents="box-none"
+      pointerEvents={visible ? 'box-none' : 'none'}
     >
       <LinearGradient
         colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.45)', 'rgba(0,0,0,0.92)']}
@@ -908,5 +980,14 @@ const styles = StyleSheet.create({
   },
   iconButtonActive: {
     backgroundColor: 'rgba(255,255,255,0.22)',
+  },
+  /** The transition back arrow's legibility disc — see `TopBar`'s `off` mode. */
+  gateBack: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
 });

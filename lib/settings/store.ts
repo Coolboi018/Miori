@@ -180,11 +180,22 @@ export type PlayerAudioMixingKey = (typeof PLAYER_AUDIO_MIXING)[number]['key'];
 
 /**
  * Persistent Android stream-cache budget. The native cache uses LRU eviction.
+ *
+ * `'off'` is a real choice, not a tiny size: it makes `PlayerScreen` pass
+ * `useCaching: false`, so no segment is written to disk at all. `bytes: 0` is
+ * never handed to `setVideoCacheSizeAsync` (zero is not a size, and the native
+ * call would reject); the setting screens branch on the key instead.
  */
 export const PLAYER_CACHES = [
   { key: 'low', label: 'Low', hint: '64 MB cache limit', bytes: 64 * 1024 * 1024 },
   { key: 'balanced', label: 'Normal', hint: '192 MB cache limit (default)', bytes: 192 * 1024 * 1024 },
   { key: 'high', label: 'High', hint: '384 MB cache limit', bytes: 384 * 1024 * 1024 },
+  {
+    key: 'off',
+    label: 'Off',
+    hint: 'Nothing kept on this device; rewinds may reload from the source',
+    bytes: 0,
+  },
 ] as const;
 export type PlayerCacheKey = (typeof PLAYER_CACHES)[number]['key'];
 
@@ -411,6 +422,11 @@ interface SettingsSchema {
    * values come from that registry, like every other style key.
    */
   'player.engine': PlayerEngineKey;
+  /**
+   * Whether the one-time "try Native surface" hint has been dismissed.
+   * Persisted so it is not shown again after the viewer has seen it.
+   */
+  'player.surfaceHintDismissed': boolean;
   /** How much video is held in front of the playhead. See PLAYER_BUFFERS. */
   'player.buffer': PlayerBufferKey;
   /**
@@ -605,6 +621,7 @@ export const DEFAULTS: SettingsSchema = {
   'tabs.segmentedColor': '#ffffff',
   'episodes.order': 'desc',
   'player.engine': 'auto',
+  'player.surfaceHintDismissed': false,
   'player.buffer': 'balanced',
   'player.seekPrecision': DEFAULT_PRECISION,
   'player.audioMixing': 'auto',
@@ -728,6 +745,9 @@ export function isKnownValue(key: SettingKey, value: unknown): boolean {
     return typeof value === 'boolean';
   }
   if (key === 'player.autoSkipOutro') {
+    return typeof value === 'boolean';
+  }
+  if (key === 'player.surfaceHintDismissed') {
     return typeof value === 'boolean';
   }
   if (key === 'player.cache') {

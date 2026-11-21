@@ -22,6 +22,11 @@
  */
 
 import { fetchJson, fetchText, fetchTimed, probeHls } from '../lib/extensions/fetch';
+import {
+  isOfflineError,
+  normalizeNetworkState,
+  setNetworkSnapshot,
+} from '../lib/net/connectivity';
 
 const realFetch = globalThis.fetch;
 
@@ -236,6 +241,84 @@ async function main() {
     withVariant.alive && withVariant.video,
     JSON.stringify(withVariant)
   );
+
+  // --- 5. offline fail-fast and transient retry --------------------------
+  //
+  // Offline is a positive claim made by the connectivity store. While it holds,
+  // `fetchText` must not touch the network at all, and the error it throws must
+  // be the tagged offline error so callers can tell "no radio" from "bad host".
+  setNetworkSnapshot(normalizeNetworkState({ isConnected: false }, Date.now()));
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    throw new TypeError('network down');
+  }) as typeof fetch;
+  started = Date.now();
+  msg = await failure(fetchText('https://cdn.test/offline', 1000, undefined, 'offline probe'));
+  elapsed = Date.now() - started;
+  check('offline: no fetch is attempted', fetchCalls === 0, `calls=${fetchCalls}`);
+  check('offline: throws the offline sentence', /offline/i.test(msg ?? ''), String(msg));
+  check('offline: returns quickly', elapsed < 200, `took ${elapsed}ms`);
+
+  // The connection comes back: retries may now run.
+  setNetworkSnapshot(normalizeNetworkState({ isConnected: true, isInternetReachable: true }, Date.now()));
+
+  // A transient socket failure on the first two attempts must recover, not
+  // surface. The budget is shared, so three attempts still land inside `ms`.
+  fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    if (fetchCalls <= 2) throw new TypeError('socket hang up');
+    return { ok: true, status: 200, text: async () => '{"ok":true}' } as unknown as Response;
+  }) as typeof fetch;
+  started = Date.now();
+  let recovered: { ok: boolean } | undefined;
+  let retryThrew: string | undefined;
+  try {
+    recovered = await fetchJson<{ ok: boolean }>('https://cdn.test/retry', 2000);
+  } catch (e) {
+    retryThrew = e instanceof Error ? e.message : String(e);
+  }
+  elapsed = Date.now() - started;
+  check('retry: a transient failure recovers', recovered?.ok === true, retryThrew ?? '');
+  check('retry: it retried exactly twice', fetchCalls === 3, `calls=${fetchCalls}`);
+  check('retry: it stayed inside the budget', elapsed < 2000, `took ${elapsed}ms`);
+
+  // A 5xx is retried too, and recovers when the host does.
+  fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    const ok = fetchCalls >= 2;
+    return {
+      ok,
+      status: ok ? 200 : 503,
+      text: async () => (ok ? '{"ok":true}' : 'upstream is down'),
+    } as unknown as Response;
+  }) as typeof fetch;
+  recovered = undefined;
+  retryThrew = undefined;
+  try {
+    recovered = await fetchJson<{ ok: boolean }>('https://cdn.test/five', 2000);
+  } catch (e) {
+    retryThrew = e instanceof Error ? e.message : String(e);
+  }
+  check('retry: a 5xx recovers on the next attempt', recovered?.ok === true, retryThrew ?? '');
+  check('retry: a 5xx was retried once', fetchCalls === 2, `calls=${fetchCalls}`);
+
+  // While offline, a host that would otherwise 5xx must never be retried —
+  // the offline sentence wins and the wire stays untouched.
+  setNetworkSnapshot(normalizeNetworkState({ isConnected: false }, Date.now()));
+  fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return { ok: false, status: 503, text: async () => 'upstream is down' } as unknown as Response;
+  }) as typeof fetch;
+  msg = await failure(fetchText('https://cdn.test/offline5', 1000, undefined, 'offline 5xx'));
+  check('offline: a 5xx is not retried into the wire', fetchCalls === 0, `calls=${fetchCalls}`);
+  check('offline: the offline sentence wins', isOfflineError(msg ? new Error(msg) : null) || /offline/i.test(msg ?? ''), String(msg));
+
+  // Restore for the rest of the script (none) and for cleanliness.
+  setNetworkSnapshot(normalizeNetworkState({ isConnected: true, isInternetReachable: true }, Date.now()));
 
   globalThis.fetch = realFetch;
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');

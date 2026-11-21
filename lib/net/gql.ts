@@ -37,6 +37,12 @@
 // 4xx that is not a 429 is AniList telling us the query is wrong, and repeating
 // it would just burn budget to arrive at the same answer.
 
+import {
+  isOffline,
+  isOfflineError,
+  offlineError,
+} from '../net/connectivity';
+
 const API = 'https://graphql.anilist.co';
 
 /**
@@ -264,6 +270,12 @@ interface GqlOptions {
  * normalisers downstream already treat a missing key as `[]`.
  */
 async function attempt<T>(query: string, options: GqlOptions): Promise<T> {
+  // FAIL FAST WHILE OFFLINE. This is checked BEFORE the budget: waiting for a
+  // slot on an allowance that cannot be spent is a spinner with no possible
+  // outcome, and on a phone the wait can be tens of seconds. The tagged error
+  // is what tells React Query and the screens not to retry.
+  if (isOffline()) throw offlineError();
+
   await admit();
 
   const ctrl = new AbortController();
@@ -321,6 +333,9 @@ function isAbort(e: unknown): boolean {
 /** Whether this failure could plausibly become a success on another attempt. */
 function isRetryable(e: unknown): boolean {
   if (isAbort(e)) return false;
+  // No network is not a transient transport failure: every retry would fail
+  // the same way and only delay the moment the screen can say so.
+  if (isOfflineError(e)) return false;
   if (isTimeout(e)) return true;
   if ((e as GqlError)?.retryAfterMs != null) return true;
   const status = (e as GqlError)?.status;
@@ -366,6 +381,9 @@ export async function gql<T>(
       } catch (e) {
         lastError = e;
         if (attempt_ === MAX_ATTEMPTS || !isRetryable(e)) throw e;
+        // The radio can disappear between attempts. Do not spend a backoff
+        // sleeping on a connection that is already known to be gone.
+        if (isOffline()) throw offlineError();
         // A rate limit is AniList's own instruction, so it wins over our backoff
         // schedule — going early on a 429 is how a limit turns into a ban.
         const wait = (e as GqlError).retryAfterMs ?? RETRY_BASE_MS * 2 ** (attempt_ - 1);

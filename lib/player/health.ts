@@ -43,15 +43,13 @@
 //    Without `noteInterruption`, every trip to the app switcher would burn a
 //    failover round on a stream that is completely healthy.
 //
-// 4. DOWNGRADING THRASHES UNLESS IT HAS A FLOOR AND A FLOOR TO UNDO IT. An
-//    adaptive monitor that reacts to a thin buffer and forgets the instant it
-//    thickens will walk the ladder to the bottom on a marginal-but-playable
-//    connection — which is worse than the stutter it was fixing, because the
-//    viewer is now watching 480p having never been asked. There are two
-//    thresholds and they are deliberately asymmetric: act below `starveFloor`,
-//    forget only above `recoverFloor`, and only after the buffer has sat there
-//    for `RECOVER_WINDOW`. `resetHealthOnRecovery` is asserted to be
-//    unreachable by construction in `scripts/check-player-health.ts`.
+// 4. A THIN BUFFER IS NOT AN INSTRUCTION TO CHANGE QUALITY. The monitor still
+//    reports `starving` so a caller CAN show a hint, but it never decides to
+//    drop a rung. The old auto-downgrade passed a quality LABEL into an API
+//    that expects a `src:variant` key, so it changed nothing — and because the
+//    per-media reset cleared `dropped`, it could fire again on every failover
+//    while the toast appeared and disappeared over a stream that never moved.
+//    Changing what the viewer is watching is their decision, not a timer's.
 //
 // ═══════════════════════════════════════════════════════════════════════════
 // NO IMPORTS, DELIBERATELY
@@ -108,12 +106,13 @@ export interface HealthState {
   lastMovedAt: number;
   /** `at` of the newest sample. */
   lastAt: number;
-  /** Start of the current uninterrupted thin-buffer run, or null. */
+  /**
+   * Start of the current uninterrupted thin-buffer run, or null.
+   *
+   * Diagnostic only. It feeds the `starving` verdict and nothing else: no
+   * quality change, no source walk, no timer that acts on the viewer's behalf.
+   */
   starvingSince: number | null;
-  /** Start of the current uninterrupted comfortable-buffer run, or null. */
-  deepSince: number | null;
-  /** True once a tier has been dropped and not yet earned back. Trap 4. */
-  dropped: boolean;
   /**
    * The earliest time a stall MAY be declared.
    *
@@ -152,10 +151,9 @@ export const MOVE_EPS = 0.05;
  * covers is explained — not in words (the device verdict of 9 Nov retired the
  * centre-screen state text: slow internet hopped the words fast enough to
  * flicker, and none of them changed what the viewer should do) but in ACTIONS
- * with doors behind them: the ring explains now, the monitor drops a tier at
- * `STARVE_WINDOW`, and at 15s this either reconnects or prints the engine's
- * own message on the error card. A wait with answers behind it is tolerable;
- * "it froze" is what a silent one reads as.
+ * with doors behind them: the ring explains now, and at 15s this either
+ * reconnects or prints the engine's own message on the error card. A wait with
+ * answers behind it is tolerable; "it froze" is what a silent one reads as.
  *
  * Deliberately NOT a function of the app being foregrounded. `noteInterruption`
  * handles that case instead of widening this, because a wider threshold is also
@@ -219,46 +217,20 @@ export const REBUFFER_HINT_MS = 700;
  */
 export const SEEK_STALL_MS = 20_000;
 
-/**
- * A thin buffer has to persist this long before a tier is dropped.
- *
- * The buffer dips on every seek, every quality switch and every momentary
- * network wobble. Acting on any of those produces a ladder walk on a connection
- * that never actually needed one (trap 4), so the response is to the SUSTAINED
- * condition and never to the instantaneous one.
- */
-export const STARVE_WINDOW = 12_000;
-
-/**
- * The buffer has to be comfortably this deep for `RECOVER_WINDOW` before a
- * dropped tier is forgotten.
- *
- * Asymmetric with the starve threshold on purpose, and enforced rather than
- * assumed: `scripts/check-player-health.ts` asserts `recoverFloor >
- * starveFloor` for every horizon, including the degenerate ones. If those two
- * ever crossed, a buffer oscillating between them would either never drop a
- * tier or drop one on every pass, and both would look like working software.
- */
-export const RECOVER_WINDOW = 30_000;
-
 export interface HealthProfile {
-  /** Below this many seconds of media ahead, the buffer is a problem. */
+  /** Below this many seconds of media ahead, the buffer is thin. */
   starveFloor: number;
-  /** At or above this, for long enough, the network is demonstrably fine. */
-  recoverFloor: number;
 }
 
 /**
- * The two thresholds, derived from the buffer horizon the player is configured
- * with (`BufferOptions.preferredForwardBufferDuration`).
+ * The threshold, derived from the buffer horizon the player is configured with
+ * (`BufferOptions.preferredForwardBufferDuration`).
  *
- * Deriving them is the point. A user who chose Low is holding ~15 seconds of
+ * Deriving it is the point. A user who chose Low is holding ~15 seconds of
  * media; telling them they are starving at 8 seconds ahead would be a permanent
- * false alarm on a perfectly healthy stream, and an adaptive monitor that
- * reacts to its own false alarms walks the ladder to the floor inside a minute
- * (trap 4 again — the same bug by a different route). The floors are fractions
- * of the horizon the user actually picked, so "starving" means the same thing
- * at every setting.
+ * false alarm on a perfectly healthy stream. The floor is a fraction of the
+ * horizon the viewer actually picked, so "starving" means the same thing at
+ * every setting.
  *
  * Clamped at both ends so a degenerate horizon cannot produce a threshold of
  * zero, which would make every frame a violation.
@@ -266,15 +238,7 @@ export interface HealthProfile {
 export function healthProfile(horizonSeconds: number): HealthProfile {
   const horizon =
     Number.isFinite(horizonSeconds) && horizonSeconds > 0 ? horizonSeconds : 20;
-  const starveFloor = Math.min(12, Math.max(3, horizon * 0.2));
-  const recoverFloor = Math.min(30, Math.max(6, horizon * 0.45));
-  // Structurally impossible for the two to cross, whatever the horizon. The
-  // check asserts it anyway, because a clamp that is correct today is not a
-  // reason to stop asserting it tomorrow.
-  return {
-    starveFloor,
-    recoverFloor: Math.max(recoverFloor, starveFloor + 1),
-  };
+  return { starveFloor: Math.min(12, Math.max(3, horizon * 0.2)) };
 }
 
 /**
@@ -305,24 +269,16 @@ export function resetHealth(now: number): HealthState {
     lastMovedAt: now,
     lastAt: now,
     starvingSince: null,
-    deepSince: null,
-    dropped: false,
     deadlineAt: now + STALL_MS,
   };
 }
 
 /**
- * Restart the CLOCKS after an interruption, keeping what has been DECIDED.
+ * Restart the CLOCKS after an interruption (trap 3).
  *
- * `AppState` backgrounding is the case that needs this (trap 3), and the reason
- * it cannot simply be `resetHealth` is worth stating: a trip to the app switcher
- * is not evidence that the network recovered. Clearing `dropped` there would
- * let a phone that briefly loses signal walk the whole quality ladder, one
- * backgrounding at a time, with the viewer never having chosen any of it.
- *
- * `starvingSince` IS cleared, because the buffer behind us describes a
- * connection that no longer exists and must not be allowed to accumulate into a
- * downgrade decision for the connection we return to.
+ * `starvingSince` is cleared because the buffer behind us describes a
+ * connection that no longer exists; carrying the run forward would make the
+ * connection we return to inherit a thin-buffer streak it never earned.
  */
 export function noteInterruption(prev: HealthState, at: number): HealthState {
   return {
@@ -331,7 +287,6 @@ export function noteInterruption(prev: HealthState, at: number): HealthState {
     lastAt: at,
     deadlineAt: at + STALL_MS,
     starvingSince: null,
-    deepSince: null,
   };
 }
 
@@ -354,23 +309,12 @@ export function noteSeek(prev: HealthState, at: number): HealthState {
     // in front of the playhead by the seek itself, so carrying the old
     // `starvingSince` forward would age a run that began before the seek.
     starvingSince: null,
-    deepSince: null,
   };
 }
 
 export interface HealthVerdict {
   state: HealthState;
   health: PlaybackHealth;
-  /**
-   * True exactly once per bad-network episode: the caller should drop one
-   * quality tier.
-   *
-   * A SEPARATE BOOLEAN rather than something inferred from `health.kind`. A
-   * caller needs to render `starving` continuously while acting on it once, and
-   * an overloaded verdict field is how those two get conflated into a ladder
-   * walk.
-   */
-  dropTier: boolean;
 }
 
 /**
@@ -411,9 +355,8 @@ export function observeHealth(
   // monitor has not seen any evidence of a stall, so there is nothing to lose.
   if (!s.playing || s.status === 'error' || s.status === 'idle') {
     return {
-      state: { ...base, lastMovedAt: s.at, starvingSince: null, deepSince: null },
+      state: { ...base, lastMovedAt: s.at, starvingSince: null },
       health: { kind: 'inactive' },
-      dropTier: false,
     };
   }
 
@@ -421,9 +364,7 @@ export function observeHealth(
   //
   // 16 Nov. See `STARVED_SAMPLE_MS`: a starved app is not a dead stream, and
   // treating one as the other is how the player adds a source walk to a device
-  // that is already too slow. `dropped` survives (it is spread from `base`),
-  // for the same reason `noteInterruption` keeps it: a starved stretch is not
-  // evidence about the connection at all.
+  // that is already too slow.
   if (s.at - prev.lastAt > STARVED_SAMPLE_MS) {
     return {
       state: {
@@ -431,10 +372,8 @@ export function observeHealth(
         lastMovedAt: s.at,
         deadlineAt: s.at + STALL_MS,
         starvingSince: null,
-        deepSince: null,
       },
       health: { kind: 'unknown' },
-      dropTier: false,
     };
   }
 
@@ -447,8 +386,8 @@ export function observeHealth(
   // here would make the monitor blind to exactly the case it exists to catch.
   //
   // The running buffer measurement is discarded rather than carried: after a
-  // stall it describes nothing, and letting it age would fire a spurious
-  // downgrade on the fresh source.
+  // stall it describes nothing, and letting it age would make the fresh source
+  // inherit a thin-buffer streak it never earned.
   //
   // `frozenMs` is reported for the UI and is deliberately NOT the condition —
   // after a seek the deadline can be later than `lastMovedAt + STALL_MS`, and
@@ -458,9 +397,8 @@ export function observeHealth(
 
   if (s.at >= base.deadlineAt) {
     return {
-      state: { ...base, starvingSince: null, deepSince: null },
+      state: { ...base, starvingSince: null },
       health: { kind: 'stalled', ahead: bufferAhead(s.buffered, s.position), frozenMs },
-      dropTier: false,
     };
   }
 
@@ -470,56 +408,29 @@ export function observeHealth(
   //
   // An absence of evidence about the buffer is not evidence of a bad buffer.
   // This returns BEFORE the starve bookkeeping is updated, so an unknowable
-  // sample cannot start a starvation run, extend one, or be counted as a
-  // comfortable one either. `dropped` is left exactly as it was: a stretch of
-  // `-1`s is not a recovery, and treating it as one would erase the record that
-  // a tier had already been given up.
+  // sample cannot start a starvation run or extend one.
   if (ahead === null) {
     return {
-      state: { ...base, starvingSince: null, deepSince: null },
+      state: { ...base, starvingSince: null },
       health: { kind: 'unknown' },
-      dropTier: false,
     };
   }
 
-  // ── Rule 4: bookkeeping, then the two remaining verdicts. ───────────────
+  // ── Rule 4: a thin buffer is reported, never acted on. ──────────────────
   //
-  // Both runs are maintained on every knowable sample. The comfortable run is
-  // tracked even while starving, because it is the thing that ends a
-  // starvation, and a monitor that only looked at it when it was comfortable
-  // would never be able to tell how long it had been comfortable for.
+  // `starving` is a word for the UI and for a future hint. It is deliberately
+  // NOT a reason to change quality, restart the source, or show a spinner: a
+  // thin buffer is still a moving picture, and the old auto-downgrade turned
+  // this one condition into repeated reloads on exactly the connection least
+  // able to afford them.
   const starving = ahead < profile.starveFloor;
-  const comfortable = ahead >= profile.recoverFloor;
-
   const starvingSince = starving ? prev.starvingSince ?? s.at : null;
-  const deepSince = comfortable ? prev.deepSince ?? s.at : null;
-
-  // How long the buffer has been comfortable *continuously*. Read from
-  // `prev.deepSince` deliberately: on the first comfortable sample the run is
-  // zero-length by definition, and using the value computed above would make
-  // `deepSince` immediately equal to `s.at` and measure nothing.
-  const deepRunMs = comfortable && prev.deepSince != null ? s.at - prev.deepSince : 0;
-
-  // The anti-thrash gate. Forgetting a dropped tier takes a LONG comfortable
-  // run, not one comfortable sample — which is the whole of trap 4.
-  const dropped = prev.dropped && deepRunMs < RECOVER_WINDOW;
-
   const starveMs = starvingSince != null ? s.at - starvingSince : 0;
-  const dropTier = starving && !dropped && starveMs >= STARVE_WINDOW;
-
-  if (dropTier) {
-    return {
-      state: { ...base, starvingSince, deepSince, dropped: true },
-      health: { kind: 'starving', ahead, forMs: starveMs },
-      dropTier: true,
-    };
-  }
 
   if (starving) {
     return {
-      state: { ...base, starvingSince, deepSince, dropped },
+      state: { ...base, starvingSince },
       health: { kind: 'starving', ahead, forMs: starveMs },
-      dropTier: false,
     };
   }
 
@@ -533,50 +444,9 @@ export function observeHealth(
   // off under the viewer's thumb during a double-tap seek sequence. The frozen
   // playhead is the actual evidence, and it cannot flicker.
   if (frozenMs >= REBUFFER_HINT_MS) {
-    return { state: { ...base, starvingSince, deepSince, dropped }, health: { kind: 'rebuffering', ahead, frozenMs }, dropTier: false };
+    return { state: { ...base, starvingSince }, health: { kind: 'rebuffering', ahead, frozenMs } };
   }
 
-  return { state: { ...base, starvingSince, deepSince, dropped }, health: { kind: 'ok', ahead }, dropTier: false };
+  return { state: { ...base, starvingSince }, health: { kind: 'ok', ahead } };
 }
 
-/**
- * The rung below `active` on a ladder sorted highest-first, or null at the
- * bottom.
- *
- * `active` is the resolution the pipeline is ACTUALLY on — `player.videoTrack`,
- * which is the only observation available — matched against the ladder's own
- * labels. It is a `number` because the variant list this is paired with carries
- * labels like "1080p" and a height is the thing they can be compared against;
- * see `heightOfLabel` for the parsing, which lives here so the caller cannot
- * do it two ways.
- *
- * The unknown case — a ladder we cannot match the pipeline to — deliberately
- * steps down ONE rung from the second-from-top rather than from the top.
- * ExoPlayer's own ABR has already been running for however long the buffer was
- * thin, so the pipeline is almost certainly not on the highest rung, and
- * selecting the top of the ladder would be a "recovery" that raises quality
- * during the exact incident that was meant to lower it.
- */
-export function nextLowerRung(
-  ladder: readonly string[],
-  activeHeight: number | null | undefined
-): string | null {
-  if (ladder.length < 2) return null;
-  if (activeHeight != null && Number.isFinite(activeHeight)) {
-    const index = ladder.findIndex((label) => heightOfLabel(label) === activeHeight);
-    if (index >= 0) return index + 1 < ladder.length ? ladder[index + 1] : null;
-  }
-  return ladder.length >= 2 ? ladder[1] : null;
-}
-
-/**
- * The pixel height a quality label describes, or 0.
- *
- * "1080p" -> 1080, "720" -> 720, "1500k" -> 0. The `k` form is a bitrate and
- * not a height, and guessing a height for it would let a ladder of bitrate
- * labels match the pipeline's resolution by accident.
- */
-export function heightOfLabel(label: string): number {
-  const m = /(\d{3,4})\s*p?\b/i.exec(label);
-  return m ? parseInt(m[1], 10) : 0;
-}

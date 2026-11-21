@@ -32,7 +32,12 @@
 //                      AppState in `refetchStaleOnForeground`, which can tell
 //                      "the user came back" from "the app was never closed".
 
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, onlineManager } from '@tanstack/react-query';
+import {
+  getNetworkSnapshot,
+  isOfflineError,
+  subscribeNetworkStatus,
+} from '../net/connectivity';
 
 /**
  * How stale a screen's data may be before a background refetch is worth a
@@ -62,7 +67,16 @@ export const queryClient = new QueryClient({
     queries: {
       staleTime: DEFAULT_STALE_TIME_MS,
       gcTime: DEFAULT_GC_TIME_MS,
-      retry: 1,
+      /**
+       * ONE retry, except while the device is offline.
+       *
+       * The transport already retries transient failures twice, so a second
+       * layer here is deliberately shallow (see the note above). An offline
+       * error is not transient — there is nothing to retry until the network
+       * comes back — so it fails immediately and React Query's pause machinery
+       * resumes the query on reconnect instead of burning attempts now.
+       */
+      retry: (failureCount, error) => !isOfflineError(error) && failureCount < 1,
       refetchOnWindowFocus: false,
       refetchOnReconnect: true,
       /**
@@ -83,6 +97,30 @@ export const queryClient = new QueryClient({
     },
   },
 });
+
+/**
+ * Teach React Query about the device's connectivity.
+ *
+ * React Query ships a web-only `online`/`offline` listener; on React Native
+ * those events do not exist, so `onlineManager` stays at its default (`true`)
+ * and every query keeps retrying into a dead radio. This bridge is what makes
+ * `refetchOnReconnect` in the policy above mean something: going offline pauses
+ * eligible queries, and coming back flips the manager to online, which is the
+ * event React Query already knows how to resume on.
+ *
+ * 'unknown' is treated as online. It only exists for the first few hundred
+ * milliseconds of a cold launch, and pausing the home rails while the native
+ * module answers would turn a fast start into a spinner.
+ *
+ * Returns the unsubscribe so the root layout can own the lifecycle.
+ */
+export function bindQueryOnlineManager(): () => void {
+  const apply = () => {
+    onlineManager.setOnline(getNetworkSnapshot().kind !== 'offline');
+  };
+  apply();
+  return subscribeNetworkStatus(apply);
+}
 
 /**
  * Refetch ONE query, but only if it is actually stale.

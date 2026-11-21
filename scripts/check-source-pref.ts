@@ -16,9 +16,12 @@
  *   2. A remembered extension that did not answer this resolve falls back to
  *      the ranked top — a stale preference never costs a watchable episode.
  *   3. No memory means rank 0, exactly as before.
- *   4. A GLOBAL default source (`player.defaultSource`) outranks the memory
- *      when its extension answered — a stated preference beats a learned
- *      one — and falls through to the memory when it did not.
+ *   4. The extension that actually PLAYED outranks a GLOBAL default
+ *      (`player.defaultSource`). The 21 Nov report: Mega was playing, the
+ *      viewer backed out and returned, and the Settings default opened
+ *      instead. Proof from a minute ago beats a guess from Settings; the
+ *      default still decides when there is no memory, and still falls
+ *      through when nobody can honour it.
  */
 
 import { pickStartIndex } from '../lib/player/sourcePref';
@@ -109,35 +112,54 @@ section('3. No memory is exactly the old behaviour');
   check('empty list → 0, finite', pickStartIndex([], 'mega'), 0);
 }
 
-section('4. A GLOBAL default source outranks the learned memory — when it answered');
+section('4. The PROVEN source outranks the stated default');
 
 {
-  // THE OLD SHAPE, watched failing: the two-argument call. A viewer who set
-  // Mega in Settings watched one episode elsewhere, the frame-render save
-  // wrote the per-anime memory over it, and the global default never stuck.
+  // THE OLD SHAPE, watched failing: the default was checked first, so after
+  // watching on Mega the player opened on the Settings default (filmu) again.
+  const oldShape = (pref: string | null, def?: string | null) => {
+    if (def) {
+      const i = ranked.findIndex((s) => s.extId === def);
+      if (i >= 0) return i;
+    }
+    if (!pref) return 0;
+    const i = ranked.findIndex((s) => s.extId === pref);
+    return i >= 0 ? i : 0;
+  };
+
   check(
-    'old shape (no default argument) lets the memory override the setting — WRONG, watched failing',
-    pickStartIndex(ranked, 'anikoto'),
-    3
+    'old shape: default filmu wins even though mega just played — WRONG, watched failing',
+    oldShape('mega', 'filmu'),
+    0
   );
   check(
-    'the stated default starts the walk, past the memory',
-    pickStartIndex(ranked, 'anikoto', 'mega'),
+    'real rule: the source that actually played starts the walk, past the default',
+    pickStartIndex(ranked, 'mega', 'filmu'),
     2
   );
   check(
-    'the stated default starts at that extension\'s FIRST row, not an exact row',
+    "the proven source starts at ITS first row, not an exact quality row",
+    pickStartIndex(ranked, 'anikoto', 'filmu'),
+    3
+  );
+  check(
+    "no memory: the stated default decides, exactly as before",
+    pickStartIndex(ranked, null, 'mega'),
+    2
+  );
+  check(
+    "the stated default starts at that extension's FIRST row",
     pickStartIndex(ranked, null, 'anikoto'),
     3
   );
   check(
-    'a default the resolve cannot honour falls through to the memory, then the top',
-    pickStartIndex(ranked, 'mega', 'zoko-fallback-that-vanished'),
+    'a memory the resolve cannot honour falls through to the default',
+    pickStartIndex(ranked, 'gone', 'mega'),
     2
   );
   check(
-    'a default nobody can honour with no memory → ranked top, never lose the episode',
-    pickStartIndex(ranked, null, 'zoko-fallback-that-vanished'),
+    'a memory AND a default nobody can honour → ranked top, never lose the episode',
+    pickStartIndex(ranked, 'gone', 'also-gone'),
     0
   );
   check(

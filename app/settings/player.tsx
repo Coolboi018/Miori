@@ -19,8 +19,8 @@
 // Software / Auto, all three of which produced a byte-identical
 // `PlayerTuning`. `scripts/check-player-scrub.ts` pins the absence.
 
-import { Platform, Pressable, StyleSheet, Text } from 'react-native';
-import { setVideoCacheSizeAsync } from 'expo-video';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { clearVideoCacheAsync, setVideoCacheSizeAsync } from 'expo-video';
 import { useRouter } from 'expo-router';
 import { useMemo } from 'react';
 import { useTheme } from '@/lib/ui/useTheme';
@@ -29,6 +29,7 @@ import {
   PLAYER_BUFFERS,
   PLAYER_CACHES,
   PLAYER_DEFAULT_QUALITIES,
+  PLAYER_ENGINES,
   PLAYER_SWIPE_SIDES,
   PLAYER_TRIGGER_IDS,
   type PlayerBufferKey,
@@ -60,6 +61,8 @@ export default function PlayerSettings() {
   const defaultQuality = useSetting('player.defaultQuality');
   const hiddenControls = useSetting('player.hiddenControls');
   const swipeSides = useSetting('player.swipeSides');
+  const engine = useSetting('player.engine');
+  const surfaceHintDismissed = useSetting('player.surfaceHintDismissed');
 
   /** The hidden chip ids, parsed — the store's validator guarantees the shape. */
   const hiddenIds = useMemo(() => {
@@ -89,6 +92,37 @@ export default function PlayerSettings() {
 
   return (
     <SettingsPage title="Player">
+      {!surfaceHintDismissed ? (
+        <View style={[styles.hintCard, { backgroundColor: color.bg.surface, borderColor: color.border.muted }]}>
+          <Text style={[styles.hintTitle, { color: color.text.primary }]}>
+            Low-end device? Try Native surface
+          </Text>
+          <Text style={[styles.hintBody, { color: color.text.muted }]}>
+            Native surface (SurfaceView) can be smoother on weak hardware. If you see
+            subtitle/chrome glitches or wrong layering afterwards, switch back to Auto here.
+          </Text>
+          <View style={styles.hintActions}>
+            <Pressable
+              onPress={() => {
+                setSetting('player.engine', 'native');
+                setSetting('player.surfaceHintDismissed', true);
+              }}
+              style={[styles.hintBtn, { backgroundColor: color.accent.base }]}
+            >
+              <Text style={styles.hintBtnText}>Try it</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setSetting('player.surfaceHintDismissed', true)}
+              style={styles.hintBtnGhost}
+            >
+              <Text style={[styles.hintBtnGhostText, { color: color.text.muted }]}>
+                Don&apos;t show again
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
       {/* The two settings viewers actually ask for, in their own sections like
           Buffer below. Both are preferences, not requirements: a source that
           does not answer this episode, or a rung the episode does not offer,
@@ -172,7 +206,7 @@ export default function PlayerSettings() {
 
       {Platform.OS === 'android' ? (
         <SettingSection title="Episode cache">
-          <Text style={[styles.bufferHint, { color: color.text.muted }]}>Keeps stream data on this device while watching, then clears it when you leave. Higher limits use more storage; they don’t guarantee a fixed rewind duration. Changes while watching apply after you leave the player.</Text>
+          <Text style={[styles.bufferHint, { color: color.text.muted }]}>Keeps stream data on this device for rewinds and replays. Off writes nothing to disk; choosing it also clears what is already cached. Higher limits use more storage. Changes apply the next time the player loads.</Text>
           {PLAYER_CACHES.map((profile) => (
             <SettingRow
               key={profile.key}
@@ -181,6 +215,15 @@ export default function PlayerSettings() {
               selected={cache === profile.key}
               onSelect={() => {
                 setSetting('player.cache', profile.key as PlayerCacheKey);
+                if (profile.key === 'off') {
+                  // There is no size to set here: the player simply stops
+                  // writing. Reclaim whatever an earlier profile left behind.
+                  void clearVideoCacheAsync().catch(() => {
+                    // A live player refuses the clear; the setting still takes
+                    // effect on the next load, and the files stay until then.
+                  });
+                  return;
+                }
                 void setVideoCacheSizeAsync(profile.bytes).catch(() => {
                   // An existing player prevents changing Expo's global cache
                   // limit; the selected value is applied on the next launch.
@@ -225,6 +268,22 @@ export default function PlayerSettings() {
         ))}
       </SettingSection>
 
+      <SettingSection title="Advanced">
+        <Text style={[styles.bufferHint, { color: color.text.muted }]}>
+          Video surface. Native (SurfaceView) can be smoother on weak hardware but may glitch
+          overlays; Auto (TextureView) is the safe default.
+        </Text>
+        {PLAYER_ENGINES.map((e) => (
+          <SettingRow
+            key={e.key}
+            label={e.label}
+            hint={e.hint}
+            selected={engine === e.key}
+            onSelect={() => setSetting('player.engine', e.key)}
+          />
+        ))}
+      </SettingSection>
+
       <SettingSection title="Playback data">
         <SettingRow label="Reset resume positions" hint="Forget where you left off in every anime.">
           <Pressable
@@ -246,4 +305,18 @@ export default function PlayerSettings() {
 const styles = StyleSheet.create({
   bufferHint: { fontSize: 13, lineHeight: 18, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
   clearText: { fontFamily: font.semibold, fontSize: 14 },
+  hintCard: {
+    margin: spacing.md,
+    padding: spacing.md,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: spacing.sm,
+  },
+  hintTitle: { fontFamily: font.semibold, fontSize: 14 },
+  hintBody: { fontSize: 13, lineHeight: 18 },
+  hintActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
+  hintBtn: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: 8 },
+  hintBtnText: { color: '#000', fontFamily: font.semibold, fontSize: 13 },
+  hintBtnGhost: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
+  hintBtnGhostText: { fontSize: 13 },
 });

@@ -396,7 +396,7 @@ console.log('\nthe bar cannot be pulled out from under a finger');
 
   check(
     'the bar is mounted while a drag is live, regardless of the chrome',
-    /bottomBarUp\s*=\s*\(\s*showControls\s*&&\s*!locked\s*&&\s*!panelOpen\s*\)\s*\|\|\s*scrubActive/.test(
+    /bottomBarUp\s*=\s*\(\s*visible\s*&&\s*!locked\s*&&\s*!panelOpen\s*\)\s*\|\|\s*scrubActive/.test(
       screen
     ),
     'the chrome auto-hides after 3s and ProgressBar lives inside it — a drag longer than that used to issue no seek at all'
@@ -719,11 +719,32 @@ console.log('\nthe clock does not lie about a position it does not have');
     /seekIssuedAtRef\.current = now;[\s\S]{0,120}setSeekPending\(true\);/.test(screen),
     'the buffer verdict cannot say "frozen by our own seek" — the seek itself is the signal'
   );
-  check(
-    'applying the resume settles the flag too',
-    /player\.currentTime = resumeAt;\s*\}\s*setResumeSettled\(true\);/.test(screen),
-    'the branch that DOES seek is the one that finally knows where we are'
-  );
+  //
+  // THE PROPERTY, not three adjacent lines. It used to be asserted as
+  // `/resumeAt;\s*\}\s*setResumeSettled\(true\);/`, which only held while the
+  // seek branch ended in one statement. The cue publish now sits between them
+  // (21 Nov, so a resume does not wait up to 120ms for the subtitle sampler),
+  // and the adjacency regex failed while the rule it describes still held: the
+  // settle is the LAST statement of the callback, outside both branch arms, so
+  // every path settles — including the one that seeks.
+  {
+    const applyResume =
+      /const applyResumePosition = useCallback\(\(resumeAt[\s\S]*?\n  \}, \[[^\]]*\]\);/.exec(screen)?.[0] ?? '';
+    const seekAt = applyResume.indexOf('player.currentTime = resumeAt;');
+    const settles = applyResume.match(/setResumeSettled\(true\)/g)?.length ?? 0;
+    check(
+      'applying the resume settles the flag too — every path, after the seek branch',
+      applyResume.length > 0 &&
+        seekAt >= 0 &&
+        // Two settles are legitimate — the "past the runtime" guard has its own
+        // early return. What matters is the LAST one being the callback's final
+        // statement, outside both arms of the seek branch.
+        settles >= 1 &&
+        applyResume.indexOf('} else {') > seekAt &&
+        /setResumeSettled\(true\);\s*\n\s*\}, \[/.test(applyResume),
+      'the branch that DOES seek is the one that finally knows where we are, and the settle must not be trapped inside one arm'
+    );
+  }
   check(
     'the settled flag is forwarded to the bar',
     /positionKnown=\{resumeSettled\}/.test(screen) && /positionKnown=\{positionKnown\}/.test(code('components/player/fullscreen/Chrome.tsx'))

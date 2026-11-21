@@ -16,7 +16,7 @@ export async function listVariants(
   masterUrl: string,
   headers: Record<string, string>
 ): Promise<HlsVariant[]> {
-  const text = await fetchText(masterUrl, 8000, { headers }, 'variants');
+  const text = await fetchText(masterUrl, 12000, { headers }, 'variants');
   const lines = text.split('\n').map((l) => l.trim());
   const out: HlsVariant[] = [];
   for (let i = 0; i < lines.length; i++) {

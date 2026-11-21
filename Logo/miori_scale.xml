@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- whole logo grows slightly while it appears: 0 - 1400 ms -->
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:ordering="together">
+
+    <objectAnimator
+        android:propertyName="scaleX"
+        android:valueFrom="0.9"
+        android:valueTo="1"
+        android:valueType="floatType"
+        android:duration="1400"
+        android:interpolator="@android:interpolator/fast_out_slow_in" />
+
+    <objectAnimator
+        android:propertyName="scaleY"
+        android:valueFrom="0.9"
+        android:valueTo="1"
+        android:valueType="floatType"
+        android:duration="1400"
+        android:interpolator="@android:interpolator/fast_out_slow_in" />
+</set>

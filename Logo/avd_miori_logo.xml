@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_miori_logo">
+
+    <target
+        android:name="logo_stroke"
+        android:animation="@animator/miori_stroke" />
+
+    <target
+        android:name="logo_fill"
+        android:animation="@animator/miori_fill" />
+
+    <target
+        android:name="logo_group"
+        android:animation="@animator/miori_scale" />
+</animated-vector>

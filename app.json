@@ -41,12 +41,17 @@
         }
       ],
       [
-        "expo-splash-screen",
+        "./plugins/withSplashAnimation.js",
         {
           "image": "./assets/images/splash-icon.png",
           "resizeMode": "contain",
           "backgroundColor": "#000000",
-          "imageWidth": 168
+          "imageWidth": 168,
+          "android": {
+            "drawable": {
+              "icon": "./Logo/avd_miori_logo.xml"
+            }
+          }
         }
       ],
       "expo-video",

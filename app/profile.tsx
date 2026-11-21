@@ -303,22 +303,33 @@ export default function ProfileScreen() {
           <Text style={[styles.loading, { color: color.text.muted, marginTop: spacing.xl }]}>Nothing here yet.</Text>
         ) : (
           <View style={styles.grid}>
-            {list.map((e, i) => (
+            {list.map((e, i) => {
+              const dotColor =
+                e.mediaStatus === 'RELEASING'
+                  ? color.status.success
+                  : e.mediaStatus === 'NOT_YET_RELEASED'
+                    ? color.status.info
+                    : color.text.muted;
+              return (
               <Pressable key={`${e.id}-${i}`} onPress={() => openAnime(e.id)} style={({ pressed }) => [styles.gridItem, { opacity: pressed ? 0.7 : 1 }]}>
                 {e.cover ? (
                   <Image source={{ uri: e.cover }} style={styles.gridCover} contentFit="cover" />
                 ) : (
                   <View style={[styles.gridCover, { backgroundColor: color.bg.surface }]} />
                 )}
-                <Text style={[styles.gridTitle, { color: color.text.primary }]} numberOfLines={2}>
+                <Text style={[styles.gridTitle, { color: color.text.primary }]} numberOfLines={1}>
                   {e.title}
                 </Text>
-                <Text style={[styles.gridMeta, { color: color.text.muted }]}>
-                  {e.progress}
-                  {e.episodes ? `/${e.episodes}` : ''} · {e.score ? e.score.toFixed(1) : '—'}
-                </Text>
+                <View style={styles.gridMetaRow}>
+                  <View style={[styles.gridDot, { backgroundColor: dotColor }]} />
+                  <Text style={[styles.gridMeta, { color: color.text.muted }]}>
+                    {e.progress}
+                    {e.episodes ? `/${e.episodes}` : ''} · {e.score ? e.score.toFixed(1) : '—'}
+                  </Text>
+                </View>
               </Pressable>
-            ))}
+              );
+            })}
           </View>
         )}
       </ScrollView>
@@ -352,18 +363,29 @@ function HorizontalList({ items, onPress, color }: { items: FavouriteAnime[]; on
   }
   return (
     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      {items.map((a, i) => (
+      {items.map((a, i) => {
+    const dotColor =
+      a.mediaStatus === 'RELEASING'
+        ? color.status.success
+        : a.mediaStatus === 'NOT_YET_RELEASED'
+          ? color.status.info
+          : color.text.muted;
+    return (
         <Pressable key={`${a.id}-${i}`} onPress={() => onPress(a.id)} style={({ pressed }) => [styles.favCard, { opacity: pressed ? 0.7 : 1 }]}>
           {a.cover ? (
             <Image source={{ uri: a.cover }} style={styles.favCover} contentFit="cover" />
           ) : (
             <View style={[styles.favCover, { backgroundColor: color.bg.surface }]} />
           )}
-          <Text style={[styles.favTitle, { color: color.text.primary }]} numberOfLines={2}>
-            {a.title}
-          </Text>
+          <View style={styles.favTitleRow}>
+            <View style={[styles.favDot, { backgroundColor: dotColor }]} />
+            <Text style={[styles.favTitle, { color: color.text.primary, flex: 1 }]} numberOfLines={1}>
+              {a.title}
+            </Text>
+          </View>
         </Pressable>
-      ))}
+    );
+  })}
     </ScrollView>
   );
 }
@@ -449,6 +471,8 @@ const styles = StyleSheet.create({
   favCard: { width: 110, marginRight: spacing.md },
   favCover: { width: 110, height: 165, borderRadius: radii.md, marginBottom: spacing.xs },
   favTitle: { fontSize: 12, fontFamily: font.medium, lineHeight: 15 },
+  favTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
+  favDot: { width: 6, height: 6, borderRadius: 3 },
   charCard: { width: 80, marginRight: spacing.md, alignItems: 'center' },
   charImg: { width: 72, height: 72, borderRadius: 36, marginBottom: spacing.xs },
   charName: { fontSize: 11, fontFamily: font.medium, textAlign: 'center', lineHeight: 14 },
@@ -456,7 +480,9 @@ const styles = StyleSheet.create({
   gridItem: { width: '30%' },
   gridCover: { width: '100%', aspectRatio: 2 / 3, borderRadius: radii.md, marginBottom: spacing.xs },
   gridTitle: { fontSize: 12, fontFamily: font.medium, lineHeight: 15 },
-  gridMeta: { fontSize: 10, fontFamily: font.regular, marginTop: 2 },
+  gridMeta: { fontSize: 10, fontFamily: font.regular },
+  gridMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
+  gridDot: { width: 6, height: 6, borderRadius: 3 },
   notLoggedIn: { flex: 1, alignItems: 'center', paddingHorizontal: spacing.xxl },
   notLoggedInAvatar: {
     width: 96,

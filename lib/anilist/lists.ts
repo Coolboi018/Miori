@@ -182,6 +182,8 @@ export interface FavouriteAnime {
   id: number;
   title: string;
   cover: string | null;
+  /** Anime airing status (RELEASING / NOT_YET_RELEASED / FINISHED …) for the status dot. */
+  mediaStatus: string | null;
 }
 
 export interface FavouriteCharacter {
@@ -208,7 +210,7 @@ const PROFILE_QUERY = `
       bannerImage
       statistics { anime { count meanScore minutesWatched episodesWatched } }
       favourites {
-        anime { nodes { id title { english romaji } coverImage { large } } }
+        anime { nodes { id title { english romaji } coverImage { large } status } }
         characters { nodes { id name { full } image { large } } }
       }
     }
@@ -235,6 +237,7 @@ export async function fetchProfile(token: string): Promise<ProfileData> {
         id: a.id,
         title: a.title?.english ?? a.title?.romaji ?? '',
         cover: a.coverImage?.large ?? null,
+        mediaStatus: a.status ?? null,
       })),
       characters: (v.favourites?.characters?.nodes ?? []).map((c: any) => ({
         id: c.id,
@@ -253,6 +256,8 @@ export interface MediaListEntry {
   episodes: number | null;
   score: number;
   status: string;
+  /** Anime airing status (RELEASING / NOT_YET_RELEASED / …) for the status dot. */
+  mediaStatus: string | null;
   /** Unix timestamp the entry was created — used to sort newest-first. */
   createdAt?: number;
 }
@@ -270,6 +275,7 @@ export async function fetchMediaList(token: string, userId: number, status: stri
             media {
               id
               episodes
+              status
               title { english romaji }
               coverImage { large }
             }
@@ -291,6 +297,7 @@ export async function fetchMediaList(token: string, userId: number, status: stri
         episodes: e.media.episodes ?? null,
         score: e.score ?? 0,
         status,
+        mediaStatus: e.media.status ?? null,
         createdAt: e.createdAt ?? undefined,
       });
     }

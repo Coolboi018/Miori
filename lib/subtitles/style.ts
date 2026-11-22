@@ -91,6 +91,21 @@ export const SUBTITLE_EDGE = 16;
 export const SUBTITLE_TOP_GAP = 8;
 
 /**
+ * Space between the sign block and the dialogue block, in points.
+ *
+ * Signs are translated on-screen text; they sit ABOVE the voices (see
+ * `lib/subtitles/frame.ts`). Without a gap the two plates read as one paragraph,
+ * and the eye cannot tell which line is being spoken — which on a frame with a
+ * shop sign translated over real dialogue is the difference between following
+ * the scene and reading a wall of text.
+ *
+ * Small on purpose: it separates two blocks, it does not create a third one.
+ * It is chrome that never moves, like the cue itself — no setting, no branch on
+ * whether anything is showing.
+ */
+export const SUBTITLE_STACK_GAP = 8;
+
+/**
  * Where the DEFAULT preset sits: `SUBTITLE_DEFAULT_FRAC` of the same measured
  * band the custom slider walks — i.e. the slider's own 10%.
  *

@@ -1,3 +1,4 @@
+import { isRunningInExpoGo } from 'expo';
 import { useFonts } from 'expo-font';
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useNavigationContainerRef, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -100,7 +101,30 @@ SplashScreen.preventAutoHideAsync();
  * Android (an `AsyncFunction` on iOS is not involved), and on web it is a
  * documented no-op.
  */
-SplashScreen.setOptions({ duration: SPLASH.nativeExitMs });
+// EXPO GO CANNOT CUSTOMISE THE NATIVE SPLASH. `setOptions` is a hard no-op
+// there and prints (from inside expo-splash-screen) a warning on every launch
+// — "'Splashscreen.setOptions' cannot be used in Expo Go" — so the call is
+// skipped rather than buying a console warning per launch for a configuration
+// Expo Go will never read. Expo Go draws its own splash: the AVD in `Logo/` and
+// the exit duration below only exist in a development or release build, where
+// this call does apply.
+if (!isRunningInExpoGo()) {
+  SplashScreen.setOptions({ duration: SPLASH.nativeExitMs });
+}
+
+/**
+ * The two expo-video cache calls reject with this exact sentence — even when the
+ * call that threw was the SIZE setter, which is what made the original warning
+ * blame the wrong function — whenever a `VideoPlayer` exists:
+ * "Cannot clear cache while there are active players".
+ *
+ * That is the documented precondition, not a fault, and a dev reload that
+ * restores the watch route (or a deep link straight into the player) hits it on
+ * launch. The limit is persistent, so the previous value stands and the next
+ * clean launch applies the choice. Anything else is worth a warning.
+ */
+const unexpectedCacheFailure = (e: unknown) =>
+  !/active players/i.test(String((e as Error)?.message ?? e));
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -194,14 +218,13 @@ export default function RootLayout() {
             await setVideoCacheSizeAsync(profile?.bytes ?? PLAYER_CACHES[0].bytes);
             sizeApplied = true;
           } catch (cacheError) {
-            // A VideoPlayer existed when this ran. On a genuine cold start nothing
-            // creates one before the first screen renders, so this means the effect
-            // re-ran — a Fast Refresh remount is the likely cause, which is a dev
-            // affordance rather than a bug in the app.
-            if (__DEV__) {
+            // A VideoPlayer existed when this ran — a Fast Refresh remount, a dev
+            // reload that restores the watch route, or a deep link straight into the
+            // player. That is the precondition doing its job, so it is silent: the
+            // limit is persistent and the previous one stands until a clean launch.
+            if (__DEV__ && unexpectedCacheFailure(cacheError)) {
               console.warn(
-                '[player] cache size NOT applied: a VideoPlayer was already alive. ' +
-                  'The limit is persistent, so the previous one stands until next launch.',
+                '[player] cache size NOT applied: an unexpected failure (not the players precondition).',
                 cacheError
               );
             }
@@ -211,11 +234,11 @@ export default function RootLayout() {
           try {
             await clearVideoCacheAsync();
           } catch (cacheError) {
-            // Same precondition, re-checked because a player can be CREATED
-            // between the two awaits. Distinct from the above: here the limit DID
-            // apply and only the leftover eviction was skipped.
-            if (__DEV__) {
-              console.warn('[player] cache clear skipped: a VideoPlayer appeared mid-setup.', cacheError);
+            // Same precondition, re-checked because a player can be CREATED between
+            // the two awaits. Distinct from the above: the limit DID apply and only
+            // the leftover eviction was skipped — it runs on the next clean launch.
+            if (__DEV__ && unexpectedCacheFailure(cacheError)) {
+              console.warn('[player] cache clear skipped: an unexpected failure.', cacheError);
             }
           }
         }

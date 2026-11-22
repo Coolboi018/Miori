@@ -115,9 +115,15 @@ function rebuild(): void {
       if (allow && !allow.includes(id)) continue;
       const ext = manifestToExtensionSafe(raw, url);
       if (!ext) continue;
-      seen.add(id);
+      // Dedupe on the PROVIDER id the extension reports, not only the map key.
+      // A cache written by an older build can hold the same manifest under a
+      // filename key (`filmu.json`) as well as its id; both then register as
+      // `filmu` — two probes per resolve, two verdicts, and two identical rows
+      // in the picker (which keys rows by provider).
+      if (seen.has(ext.id)) continue;
+      seen.add(ext.id);
       next.push(ext);
-      nextOrigins.set(id, url);
+      nextOrigins.set(ext.id, url);
     }
   }
   installed = next;
@@ -479,8 +485,14 @@ export async function resolveEpisode(
     registry.map((ext) => ext.resolve(anilistId, ep, idMal, hint))
   );
 
+  // ONE VERDICT PER PROVIDER. A duplicated registration must never reach the
+  // picker: its failed rows are keyed by provider, and two `failed-filmu` rows
+  // are both a duplicated React key (an ERROR in dev) and a duplicated reason.
+  const seenIds = new Set<string>();
   settled.forEach((result, i) => {
     const id = registry[i].id;
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
     if (result.status === 'rejected') {
       failed.push({ id, reason: shortReason(result.reason) });
       return;

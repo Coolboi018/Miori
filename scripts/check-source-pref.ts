@@ -24,7 +24,21 @@
  *      through when nobody can honour it.
  */
 
-import { pickStartIndex } from '../lib/player/sourcePref';
+import { nextWalkIndex, pickStartIndex } from '../lib/player/sourcePref';
+import {
+  clearSourceTrip,
+  clearSourceTrips,
+  isSourceSkipped,
+  noteSourcePlayed,
+  readSourceTrip,
+  resetSourceLedger,
+  sessionProvenSource,
+  sourceSkipHint,
+  tripHint,
+  tripKindForPlaybackFailure,
+  tripKindForResolveFailure,
+  tripSource,
+} from '../lib/player/sourceLedger';
 
 let pass = 0;
 let fail = 0;
@@ -171,6 +185,207 @@ section('4. The PROVEN source outranks the stated default');
     'empty-string default is the absence of one too',
     pickStartIndex(ranked, 'anikoto', ''),
     3
+  );
+}
+
+// ===========================================================================
+// 6. The SESSION decides: proof first, skips filtered
+// ===========================================================================
+//
+// The 22 Nov ask. A provider that is ISP-blocked or rate-limited does not
+// recover between episode 3 and episode 4, and asking it again on every open is
+// the spinner the viewer remembers. The session ledger records the verdict; the
+// start choice and the walk consume it.
+//
+// The precedence is deliberate: PROOF beats the per-anime memory, which beats
+// the stated default. A frame five seconds ago is fresher evidence than a
+// preference from last week, and the `skipped` filter applies to every rung so
+// one bad session cannot be re-probed in the background either.
+
+section('6. The session\u2019s own health decides the start');
+
+const skip = (id?: string) => (id ? isSourceSkipped(id) : false);
+
+{
+  resetSourceLedger();
+  noteSourcePlayed('zoko');
+  check(
+    'the source that just rendered a frame starts the next episode',
+    pickStartIndex(ranked, null, null, { proven: sessionProvenSource(), skipped: skip }),
+    5
+  );
+  check(
+    '...and outranks the anime memory and the stated default',
+    pickStartIndex(ranked, 'mega', 'filmu', { proven: sessionProvenSource(), skipped: skip }),
+    5
+  );
+  check(
+    'proof is per-session state, not per-title: the same id answers for another anime',
+    sessionProvenSource(),
+    'zoko'
+  );
+}
+
+{
+  // A source the session has written off is never chosen by Auto — not as
+  // proof, not as this anime's memory, not as the Settings default.
+  resetSourceLedger();
+  tripSource('anikoto', 'blocked');
+  check(
+    'a skipped source is not chosen even as the session proof',
+    pickStartIndex(ranked, null, null, { proven: 'anikoto', skipped: skip }),
+    0
+  );
+  check(
+    '...nor as this anime\u2019s memory',
+    pickStartIndex(ranked, 'anikoto', null, { skipped: skip }),
+    0
+  );
+  check(
+    '...nor as the stated default',
+    pickStartIndex(ranked, null, 'anikoto', { skipped: skip }),
+    0
+  );
+  check(
+    'the first source still alive wins when the top is skipped',
+    pickStartIndex([{ extId: 'anikoto' }, { extId: 'mega' }], null, null, { skipped: skip }),
+    1
+  );
+  check(
+    'a skip is a hint, not a lock: when EVERY source is skipped the ranked top is still tried',
+    pickStartIndex(
+      [
+        { extId: 'filmu' },
+        { extId: 'mega' },
+      ],
+      'filmu',
+      null,
+      {
+        skipped: () => true,
+      }
+    ),
+    0
+  );
+  check(
+    'a live memory is used when the session proof is skipped',
+    pickStartIndex(ranked, 'mega', null, { proven: 'anikoto', skipped: skip }),
+    2
+  );
+}
+
+// ===========================================================================
+// 7. The failover walk steps over a skipped row
+// ===========================================================================
+//
+// Without this, a dead provider in the middle of the list is tried on every
+// walk until the 3-round budget dies — the "wastes user time" half of the ask.
+
+section('7. The failover walk steps over a skipped row');
+
+const ladder = [{ extId: 'filmu' }, { extId: 'mega' }, { extId: 'anikoto' }];
+
+{
+  resetSourceLedger();
+  tripSource('mega', 'blocked');
+  check('a skipped row in the middle is stepped over', nextWalkIndex(ladder, 0, skip), 2);
+  check('the end of the list is still the end', nextWalkIndex(ladder, 2, skip), null);
+  check('an untripped walk is plain rank order (the old behaviour)', nextWalkIndex(ladder, 0), 1);
+  check('...and never returns an index past the list', nextWalkIndex(ladder, 5, skip), null);
+
+  resetSourceLedger();
+  tripSource('filmu', 'network');
+  tripSource('mega', 'server');
+  tripSource('anikoto', 'rate-limited');
+  check(
+    'when nothing is live the walk still proceeds in rank order \u2014 no refusing to try',
+    nextWalkIndex(ladder, 0, skip),
+    1
+  );
+}
+
+// ===========================================================================
+// 8. What marks a source for the session \u2014 and what must not
+// ===========================================================================
+
+section('8. What marks a source for the session');
+
+check('a provider that answered \u201cblocked\u201d is a block', tripKindForResolveFailure('blocked'), 'blocked');
+check('an ISP-level failure is a network problem', tripKindForResolveFailure('network blocked'), 'network');
+check('a 429 is a rate limit, not a block', tripKindForResolveFailure('429 Too Many Requests'), 'rate-limited');
+check('a 5xx is server trouble', tripKindForResolveFailure('503 Service Unavailable'), 'server');
+
+check(
+  '\u201cno mapping\u201d is about THIS TITLE, so it must not hide the provider from the next anime',
+  tripKindForResolveFailure('no mapping'),
+  null
+);
+check('\u201cno episodes\u201d is title-level too', tripKindForResolveFailure('no episodes'), null);
+check('\u201cno sources\u201d is title-level too', tripKindForResolveFailure('no sources'), null);
+
+check(
+  'an EXPIRED signed link is the URL\u2019s fault, not the source\u2019s',
+  tripKindForPlaybackFailure('HttpDataSource error: 403 Forbidden (expired token)'),
+  null
+);
+check('a plain 403 IS a block', tripKindForPlaybackFailure('Source error: 403 Forbidden'), 'blocked');
+check('a 429 during playback is rate limiting', tripKindForPlaybackFailure('HTTP 429'), 'rate-limited');
+check('a 5xx during playback is server trouble', tripKindForPlaybackFailure('server returned 503'), 'server');
+check(
+  'an offline DEVICE is not a verdict about any source',
+  tripKindForPlaybackFailure('Network is unreachable'),
+  null
+);
+check('an unreadable failure marks nothing', tripKindForPlaybackFailure('Something odd happened'), null);
+check('no message at all marks nothing', tripKindForPlaybackFailure(''), null);
+
+// ===========================================================================
+// 9. A frame clears the skip; a manual pick clears it for one attempt
+// ===========================================================================
+
+section('9. Proof clears a skip, and the picker can override for one attempt');
+
+{
+  resetSourceLedger();
+  tripSource('mega', 'rate-limited');
+  check('the trip is recorded', isSourceSkipped('mega'), true);
+  check('...with a one-line hint for the picker', sourceSkipHint('mega'), 'Skipped \u00b7 rate limited');
+  check('an untouched source has no hint', sourceSkipHint('filmu'), undefined);
+
+  check('a frame clears it', noteSourcePlayed('mega'), true);
+  check('...and the source is no longer skipped', isSourceSkipped('mega'), false);
+  check('...and it is the session\u2019s proven source', sessionProvenSource(), 'mega');
+  check('re-proving the same source changes nothing (no needless re-render)', noteSourcePlayed('mega'), false);
+
+  tripSource('mega', 'server');
+  clearSourceTrip('mega');
+  check(
+    'an explicit pick clears a skip WITHOUT claiming proof',
+    isSourceSkipped('mega') === false && sessionProvenSource() === 'mega',
+    true
+  );
+  check('the skip record itself is gone too', readSourceTrip('mega'), null);
+  check(
+    'the hint names the reason, not the raw native text',
+    tripHint({ kind: 'server', reason: 'x', at: 0 }),
+    'Skipped \u00b7 server error'
+  );
+
+  // "Refresh sources" — the one explicit override of the whole ledger.
+  resetSourceLedger();
+  noteSourcePlayed('zoko');
+  tripSource('mega', 'network');
+  clearSourceTrips();
+  check(
+    'an explicit refresh puts every skip back on trial but keeps the proof',
+    isSourceSkipped('mega') === false && sessionProvenSource() === 'zoko',
+    true
+  );
+
+  resetSourceLedger();
+  check(
+    'the ledger dies with the process: a reset clears skips AND proof',
+    isSourceSkipped('mega') === false && sessionProvenSource() === null,
+    true
   );
 }
 

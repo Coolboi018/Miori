@@ -81,7 +81,8 @@ import { getLoadedExtensions, createRegistry, resolveEpisode } from '@/lib/exten
 import { clearPresence, releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
 import { openAnime } from '@/lib/nav/pushOnce';
 import type { EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
-import { cueAt, parseVTT, type Cue } from '@/lib/subtitles/vtt';
+import { parseVTT, type Cue } from '@/lib/subtitles/vtt';
+import { buildSubtitleFrame } from '@/lib/subtitles/frame';
 import { defaultSubtitleStyle } from '@/lib/subtitles/style';
 import { listVariants, type HlsVariant } from '@/lib/extensions/hls';
 import { getToken } from '@/lib/anilist/auth';
@@ -1164,7 +1165,9 @@ export default function WatchScreen() {
   );
 
   const src = sources[srcIndex];
-  const cue = cueAt(cues, time);
+  // Layered like the real player: sign block above the dialogue block, so this
+  // parked screen cannot show a subtitle the shipped one would not.
+  const frame = buildSubtitleFrame(cues, time, 0);
   const skip =
     src?.intro?.start != null && src.intro?.end != null && time >= src.intro.start && time <= src.intro.end
       ? { label: 'Skip intro', to: src.intro.end }
@@ -1427,7 +1430,7 @@ export default function WatchScreen() {
                     settings, so it gets the resolved DEFAULTS rather than
                     reading the store — which is exactly what it rendered before
                     the appearance settings existed. */}
-                <SubtitleOverlay cue={cue} style={defaultSubtitleStyle()} />
+                <SubtitleOverlay frame={frame} style={defaultSubtitleStyle()} />
                 {/* Scrim only while controls are up, so the chips and title
                     stay readable over bright scenes. */}
                 {showControls ? (

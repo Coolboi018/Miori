@@ -61,13 +61,29 @@ const { readFileSync } = require('node:fs');
 
 declare const process: { cwd(): string; exit(code: number): never };
 
-import { cueAt, cueAtSync, formatSubtitleDelay, parseVTT, type Cue } from '../lib/subtitles/vtt';
+import {
+  cueAt,
+  cueAtSync,
+  cuesAt,
+  cuesAtSync,
+  formatSubtitleDelay,
+  parseVTT,
+  type Cue,
+} from '../lib/subtitles/vtt';
+import {
+  SUBTITLE_MAX_BLOCK_LINES,
+  SUBTITLE_MAX_DIALOGUE_CUES,
+  buildSubtitleFrame,
+  frameSignature,
+  isSignCue,
+  type SubtitleFrame,
+} from '../lib/subtitles/frame';
 import {
   DEFAULT_POSITION_FRAC,
   DEFAULT_SUBTITLE_STYLE_KEYS,
   SUBTITLE_DEFAULT_FRAC,
   SUBTITLE_EDGE,
-  SUBTITLE_PLATE,
+  SUBTITLE_STACK_GAP,
   SUBTITLE_TYPEGRAPHY,
   defaultSubtitleStyle,
   resolveSubtitleStyle,
@@ -262,6 +278,222 @@ check(
   formatSubtitleDelay(NaN) === 'In sync',
   formatSubtitleDelay(NaN)
 );
+
+// ===========================================================================
+// 1c. A playhead can hold a SIGN and a VOICE — nothing may be dropped
+// ===========================================================================
+//
+// The 22 Nov report: when a cue translating on-screen text runs beside a spoken
+// line, only the sign appeared; the voice was gone. The lookup returned ONE cue
+// (`cueAt`), so whichever overlapped cue came first in the track was the whole
+// subtitle. Nothing was mistimed and nothing failed to parse — the dialogue was
+// active and discarded.
+//
+// The rules pinned here, in the order they matter:
+//
+//   1. EVERY active cue is returned; the frame builder cannot lose a voice.
+//   2. The VOICE block owns the configured position; the sign goes above it.
+//   3. Signs are identified from the track's own metadata first, then by the
+//      all-caps convention, and shouting dialogue is not a sign.
+//   4. A screen full of signs is capped and can never displace the voice line.
+console.log('\n[cue layering]');
+
+/** The block a frame draws LAST — the dialogue block, when there is one. */
+function lastBlock(frame: SubtitleFrame | null) {
+  return frame ? frame.blocks[frame.blocks.length - 1] : undefined;
+}
+
+const LAYERED: Cue[] = [
+  { start: 0, end: 10, text: 'OPEN 24 HOURS', placement: 'top' },
+  { start: 0, end: 10, text: 'We should go.' },
+  { start: 0, end: 10, text: 'Not yet.' },
+];
+
+check(
+  'every cue open at t is returned, not just the first',
+  cuesAt(LAYERED, 5).length === 3,
+  `${cuesAt(LAYERED, 5).length} of 3`
+);
+check(
+  'the mutation (one cue as the whole line) would drop two active cues — so this check can fail',
+  cueAt(LAYERED, 5)?.text === 'OPEN 24 HOURS' &&
+    cuesAt(LAYERED, 5).filter((c) => c !== cueAt(LAYERED, 5)).length === 2,
+  `the old lookup returned ${JSON.stringify(cueAt(LAYERED, 5)?.text)} and dropped 2 of 3`
+);
+
+{
+  const frame = buildSubtitleFrame(LAYERED, 5, 0);
+  const sign = frame?.blocks[0];
+  const voice = frame?.blocks[1];
+  const voiceText = voice?.text ?? '';
+  check('a sign and two voices make TWO blocks, not three', frame?.blocks.length === 2, `${frame?.blocks.length}`);
+  check(
+    'the SIGN block is drawn first — above the dialogue',
+    sign?.kind === 'sign' && sign?.text === 'OPEN 24 HOURS',
+    JSON.stringify(sign)
+  );
+  check(
+    'the DIALOGUE block keeps BOTH simultaneous voices',
+    voice?.kind === 'dialogue' &&
+      voiceText.split('\n').length === 2 &&
+      /We should go\./.test(voiceText) &&
+      /Not yet\./.test(voiceText),
+    JSON.stringify(voice)
+  );
+}
+
+check(
+  'a sign-only moment still draws one block, at the configured position',
+  (() => {
+    const f = buildSubtitleFrame([{ start: 0, end: 10, text: 'OPEN 24 HOURS', placement: 'top' }], 5, 0);
+    return f?.blocks.length === 1 && f.blocks[0].kind === 'sign';
+  })()
+);
+check(
+  'a dialogue-only moment is ONE block — the plain single-cue rendering is untouched',
+  (() => {
+    const f = buildSubtitleFrame([{ start: 0, end: 10, text: 'It was not the end.\nAnd she knew it.' }], 5, 0);
+    return f?.blocks.length === 1 && f.blocks[0].kind === 'dialogue' && f.blocks[0].text === 'It was not the end.\nAnd she knew it.';
+  })()
+);
+check(
+  'the stack gap is real, so two blocks do not read as one paragraph',
+  SUBTITLE_STACK_GAP > 0 && SUBTITLE_STACK_GAP < 20,
+  `${SUBTITLE_STACK_GAP}pt`
+);
+
+// Half-open still holds for every layer: overlap must not resurrect the end
+// boundary bug (the first cue coming back for one sample after it ended).
+{
+  const PARTIAL: Cue[] = [
+    { start: 0, end: 6, text: 'first' },
+    { start: 4, end: 10, text: 'second' },
+  ];
+  check('overlapping windows both show while they overlap', cuesAt(PARTIAL, 5).length === 2);
+  check('...and neither is shown before its start', cuesAt(PARTIAL, 3).length === 1 && cuesAt(PARTIAL, 3)[0].text === 'first');
+  check('...nor at the end boundary of each', cuesAt(PARTIAL, 6).length === 1 && cuesAt(PARTIAL, 6)[0].text === 'second');
+  check('...nor after the last end', cuesAt(PARTIAL, 10).length === 0);
+}
+
+// The sync correction is one subtraction for the whole frame, so two layers
+// cannot be shifted by different amounts at their boundaries.
+{
+  check(
+    'the sync offset moves EVERY layer together',
+    cuesAtSync(LAYERED, 5, 0).length === 3 && cuesAtSync(LAYERED, 5, 6000).length === 0
+  );
+  check(
+    'a delayed frame keeps the sign above the dialogue at the new time',
+    (() => {
+      const f = buildSubtitleFrame(LAYERED, 6, 1000);
+      return f?.blocks[0]?.kind === 'sign' && f?.blocks[1]?.kind === 'dialogue';
+    })()
+  );
+}
+
+// --- classification ------------------------------------------------------
+console.log('\n[sign vs dialogue]');
+
+const cue = (text: string, placement?: 'top' | 'bottom'): Cue => ({ start: 0, end: 10, text, placement });
+check('all-caps on-screen text is a sign', isSignCue(cue('OPEN 24 HOURS')));
+check('a short all-caps label is a sign', isSignCue(cue('3 DAYS EARLIER')));
+check('the track saying "top" wins over every heuristic', isSignCue(cue('We should go.', 'top')));
+check('the track saying "bottom" keeps a caps line as dialogue', !isSignCue(cue('OPEN 24 HOURS', 'bottom')));
+check('a shouted sentence is dialogue, not a sign', !isSignCue(cue('I SAID NO!')));
+check('a normal sentence is dialogue', !isSignCue(cue('We should go.')));
+check('a bracketed sound effect stays with the voices', !isSignCue(cue('[door slams]')));
+check('a music note is not words, so it is not a sign', !isSignCue(cue('♪ ♪')));
+check('a frame-filling paragraph stays in the dialogue position', !isSignCue(cue('A'.repeat(120))));
+
+// The parser has to READ the placement, or every track that marks signs with a
+// `line:` setting falls through to the heuristic.
+{
+  const parse1 = parseVTT(['WEBVTT', '', '00:00:00.000 --> 00:00:05.000 line:5% align:middle', 'OPEN 24 HOURS', ''].join('\n'));
+  check('a top `line:` setting is parsed as a sign', parse1[0]?.placement === 'top', JSON.stringify(parse1[0]));
+  const parse2 = parseVTT(['WEBVTT', '', '00:00:00.000 --> 00:00:05.000 line:90%', 'We should go.', ''].join('\n'));
+  check('a bottom `line:` setting is parsed as bottom', parse2[0]?.placement === 'bottom', JSON.stringify(parse2[0]));
+  const parse3 = parseVTT(['WEBVTT', '', '00:00:00.000 --> 00:00:05.000 line:-2', 'We should go.', ''].join('\n'));
+  check('a negative `line:` counts up from the bottom', parse3[0]?.placement === 'bottom');
+  const parse4 = parseVTT(['WEBVTT', '', '00:00:00.000 --> 00:00:05.000', 'We should go.', ''].join('\n'));
+  check('a track that says nothing records no placement', parse4[0]?.placement === undefined);
+  const voice = parseVTT(['WEBVTT', '', '00:00:00.000 --> 00:00:05.000', '<v Sign>OPEN 24 HOURS</v>', ''].join('\n'));
+  check('a <v Sign> voice tag is a sign', voice[0]?.placement === 'top', JSON.stringify(voice[0]));
+}
+
+// --- the flood -----------------------------------------------------------
+// The reported worry: "a screen full of texts then subs also have those then
+// voice too so it can be a mess". Signs are capped by cue count AND lines, the
+// dialogue is always assembled, and no sign can push a voice out.
+{
+  const flood: Cue[] = [
+    ...Array.from({ length: 8 }, (_, i) => cue(`SIGN ${i}`, 'top')),
+    cue('The voice is still here.\nAll of it.'),
+  ];
+  const f = buildSubtitleFrame(flood, 5, 0);
+  const signs = f?.blocks.find((b) => b.kind === 'sign');
+  const voice = f?.blocks.find((b) => b.kind === 'dialogue');
+  check('a flood of signs still produces exactly two blocks', f?.blocks.length === 2, `${f?.blocks.length}`);
+  check('the sign block is capped, not a wall', (signs?.text.split('\n').length ?? 99) <= SUBTITLE_MAX_BLOCK_LINES, `${signs?.text.split('\n').length} lines`);
+  check(
+    'the VOICE line survives the flood untouched',
+    voice?.text === 'The voice is still here.\nAll of it.',
+    JSON.stringify(voice?.text)
+  );
+  check(
+    'the voice block is last, i.e. at the configured position',
+    lastBlock(f)?.kind === 'dialogue'
+  );
+
+  const manyVoices = Array.from({ length: 5 }, (_, i) => cue(`Voice number ${i + 1}.`));
+  const vf = buildSubtitleFrame(manyVoices, 5, 0);
+  check(
+    'simultaneous voices are capped too, at the documented limit',
+    (vf?.blocks[0]?.text.split('\n').length ?? 99) <= SUBTITLE_MAX_BLOCK_LINES &&
+      (vf?.blocks[0]?.text.split('\n').length ?? 0) <= SUBTITLE_MAX_DIALOGUE_CUES,
+    JSON.stringify(vf?.blocks[0]?.text)
+  );
+
+  const dup = buildSubtitleFrame([cue('OPEN 24 HOURS', 'top'), cue('OPEN 24 HOURS', 'top')], 5, 0);
+  check('an authored duplicate is shown once', dup?.blocks[0]?.text === 'OPEN 24 HOURS', JSON.stringify(dup?.blocks[0]?.text));
+}
+
+// --- the store's identity ------------------------------------------------
+// The player rebuilds this object every 120ms. If the signature did not agree
+// for equal content, `useSyncExternalStore` would re-render (and re-measure)
+// the overlay on every tick of a scene where nothing changed.
+{
+  const a = buildSubtitleFrame(LAYERED, 5, 0);
+  const b = buildSubtitleFrame(LAYERED, 5, 0);
+  // A DIFFERENT TRACK at the same playhead, not the same track at another
+  // playhead: LAYERED runs 0–10s, so t=6 is the same three cues and the same
+  // signature by design.
+  const c = buildSubtitleFrame([{ start: 0, end: 10, text: 'Something else.' }], 5, 0);
+  const cleared = buildSubtitleFrame(LAYERED, 10, 0);
+  check('the same words have the same signature across ticks', a !== b && frameSignature(a) === frameSignature(b));
+  check('...a different line does not', frameSignature(a) !== frameSignature(c));
+  check('...and a cleared screen does not', frameSignature(a) !== frameSignature(cleared) && frameSignature(cleared) === '');
+  check('...and an empty frame has the empty signature', frameSignature(null) === '' && frameSignature({ blocks: [] }) === '');
+}
+
+{
+  const overlay = code('components/player/SubtitleOverlay.tsx');
+  check(
+    'the overlay draws frame.blocks, not a single cue',
+    /frame\?\.blocks|frame\.blocks/.test(overlay) && !/cue\?\.text/.test(overlay)
+  );
+  check(
+    'the overlay spaces the sign block off the dialogue block',
+    /SUBTITLE_STACK_GAP/.test(overlay) && /marginTop/.test(overlay)
+  );
+  const stage = code('components/player/fullscreen/SubtitleStage.tsx');
+  check('the stage subscribes to the frame and passes it down', /frame=\{frame\}/.test(stage));
+  const screenSrc = code('components/player/fullscreen/PlayerScreen.tsx');
+  check(
+    'the player publishes a built frame, so no cue is dropped at the lookup',
+    /publishCue\([^;]*buildSubtitleFrame\(/.test(screenSrc),
+    'found no buildSubtitleFrame inside publishCue'
+  );
+}
 
 // ===========================================================================
 // 2. The defaults ARE the old hardcoded overlay

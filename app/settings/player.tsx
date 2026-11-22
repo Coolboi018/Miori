@@ -130,11 +130,11 @@ export default function PlayerSettings() {
           default must never cost a watchable episode. */}
       <SettingSection title="Default source">
         <Text style={[styles.bufferHint, { color: color.text.muted }]}>
-          Where every episode starts. A source that is down for this episode falls back to Auto — it remembers where you watched each anime.
+          Where every episode starts. Auto follows the source that just played, remembers where you watched each anime, and skips providers that failed earlier this session — so a blocked or rate-limited source is not retried on every episode.
         </Text>
         <SettingRow
           label="Auto"
-          hint="Remember where you watched each anime and start there (default)"
+          hint="Follow the source that just played, then where you watched this anime (default)"
           selected={defaultSource === 'auto'}
           onSelect={() => setSetting('player.defaultSource', 'auto')}
         />

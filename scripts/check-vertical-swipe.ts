@@ -308,6 +308,26 @@ check(
     !/^import .*react-native-volume-manager/m.test(volumeSrc),
   'a static import of a module Expo Go does not contain throws while the bundle evaluates'
 );
+// THE RED BOX IN EXPO GO. The dynamic import kept the app booting, but the
+// package throws from its own module body when unlinked
+// (`new NativeEventEmitter(...)` over a throwing proxy), and dev builds surface
+// that as a LogBox ERROR titled "The package 'react-native-volume-manager'
+// doesn't seem to be linked" — even though `volume.ts` catches the rejection.
+// Asking NativeModules first means the package is never evaluated at all.
+const preChecksNativeModule = (s: string) =>
+  /const nativeLinked =[^\n]*NativeModules[^\n]*VolumeManager/.test(s) &&
+  /if \(!nativeLinked\) return current;/.test(s);
+check(
+  '…and never even EVALUATES the package when it is not linked',
+  preChecksNativeModule(volumeSrc),
+  'an unlinked package throws from its own module body — that throw is the red LogBox ERROR in Expo Go'
+);
+check(
+  'MUTATION: the old loader (import inside try, no NativeModules check) fails the same predicate',
+  !preChecksNativeModule(
+    `if (!api) {\n  loading ??= (async () => {\n    try {\n      const mod = await import('react-native-volume-manager');\n    } catch { return null; }\n  })();\n}`
+  )
+);
 check(
   '…falling back to the player gain when there is no device API',
   /setVolumeFallback/.test(volumeSrc) && /setVolumeFallback\(/.test(screen)

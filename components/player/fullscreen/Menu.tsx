@@ -33,6 +33,16 @@ export interface MenuRow {
   group?: string;
   selected?: boolean;
   disabled?: boolean;
+  /**
+   * Faded but still actionable.
+   *
+   * `disabled` means "pressing this does nothing", which is right for a provider
+   * that did not answer this resolve. A source the SESSION is skipping is a
+   * different state: the app will not route to it by itself, but a tap is a
+   * legitimate "try it once now" (see the source picker's handler). Disabling it
+   * would strand a provider that has recovered but has not played a frame yet.
+   */
+  muted?: boolean;
 }
 
 export const Trigger = memo(function Trigger({

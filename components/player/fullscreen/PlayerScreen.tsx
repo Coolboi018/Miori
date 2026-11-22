@@ -90,6 +90,12 @@ import {
 } from '@/lib/player/volume';
 import { SettingsPanel } from './SettingsPanel';
 import { type MenuRow } from './Menu';
+import {
+  PIP_HANDOFF_GRACE_MS,
+  playbackStage,
+  shouldAutoEnterPip,
+  shouldHoldPlayback,
+} from '@/lib/player/pip';
 import { AppIcon } from '@/components/ui/AppIcon';
 import { SubtitleStage } from './SubtitleStage';
 import { publishCue } from '@/lib/player/cueStore';
@@ -118,7 +124,8 @@ import {
   SPEED_STEPS,
   type SpeedState,
 } from '@/lib/player/speed';
-import { cueAtSync, parseVTT, type Cue } from '@/lib/subtitles/vtt';
+import { parseVTT, type Cue } from '@/lib/subtitles/vtt';
+import { buildSubtitleFrame } from '@/lib/subtitles/frame';
 import { cueLoad } from '@/lib/subtitles/cueCache';
 import { cueLookupTime } from '@/lib/subtitles/clock';
 import { resolveSubtitleStyle } from '@/lib/subtitles/style';
@@ -160,7 +167,19 @@ import { resolveInTwoWindows } from '@/lib/player/resolveWindow';
 // The constants are referenced in comments below; the decision functions
 // default to them inside the modules, so the component imports only the verbs.
 import { healOnFrame, wrapVerdict } from '@/lib/player/failover';
-import { pickStartIndex, readSourcePref, saveSourcePref } from '@/lib/player/sourcePref';
+import { nextWalkIndex, pickStartIndex, readSourcePref, saveSourcePref } from '@/lib/player/sourcePref';
+import {
+  clearSourceTrip,
+  clearSourceTrips,
+  isSourceSkipped,
+  noteSourcePlayed,
+  readSourceTrip,
+  sessionProvenSource,
+  sourceSkipHint,
+  tripKindForPlaybackFailure,
+  tripKindForResolveFailure,
+  tripSource,
+} from '@/lib/player/sourceLedger';
 import { readQualityPref, saveQualityPref } from '@/lib/player/qualityPref';
 import { dropResolveCache, readResolveCache, writeResolveCache } from '@/lib/player/resolveCache';
 import { setChromeVisible, useChromeVisible } from '@/lib/player/chromeVisibility';
@@ -442,6 +461,16 @@ export default function LandscapePlayer() {
   const [sources, setSources] = useState<WatchSource[]>([]);
   const [failedSources, setFailedSources] = useState<{ id: string; reason: string }[]>([]);
   const [srcIndex, setSrcIndex] = useState(0);
+  /**
+   * Bumps when the session ledger changes, so the source sheet re-reads it.
+   *
+   * The ledger lives outside React (it is per-launch module state), so a trip
+   * written from `failover` or a frame that clears one changes nothing React can
+   * see. Without this counter the sheet would keep drawing the previous
+   * opinion until some unrelated render happened.
+   */
+  const [ledgerTick, setLedgerTick] = useState(0);
+  const bumpLedger = useCallback(() => setLedgerTick((n) => n + 1), []);
   const [variantsBySource, setVariantsBySource] = useState<Record<number, HlsVariant[]>>({});
   /** `null` = Auto (the master playlist). `{src,v}` locks one variant. */
   const [qualitySel, setQualitySel] = useState<{ src: number; v: number } | null>(null);
@@ -718,6 +747,33 @@ export default function LandscapePlayer() {
    */
   const [pipSupported] = useState(isPictureInPictureSupported);
   /**
+   * IS THE VIDEO IN A SYSTEM PIP WINDOW?
+   *
+   * Needed because `AppState` cannot tell PiP from a locked phone: Android
+   * pauses the activity while the PiP window is up, so both report 'background'.
+   * Every background rule in this file consults this ref, and it is a ref rather
+   * than state because the transport policy reads it from timers and player
+   * listeners that must not be rebuilt when PiP toggles.
+   */
+  const pipActiveRef = useRef(false);
+  /** Pending "did a PiP handoff start?" timer. See `PIP_HANDOFF_GRACE_MS`. */
+  const pipHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * True once the app has backgrounded with no PiP handoff and playback has been
+   * held. Stays true until the viewer returns, and is what makes a remote play
+   * (a headset button) unable to restart audio behind a locked screen.
+   */
+  const backgroundHoldRef = useRef(false);
+  /**
+   * Pending "was that PiP exit a close or an expand?" check.
+   *
+   * `onPictureInPictureStop` fires for both, and an expand arrives before the
+   * activity reports 'active', so acting on the callback alone would pause the
+   * episode the viewer just brought back to the screen. The check is deferred
+   * instead; see `onPipStop`.
+   */
+  const pipExitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
    * The video surface. Needed because `startPictureInPicture()` is a method on
    * the VIEW — the view owns the native PiP surface, and there is no
    * player-side equivalent to call instead.
@@ -882,6 +938,11 @@ export default function LandscapePlayer() {
     // Keep-awake is driven by the focused + playing effect above; default off so
     // a freshly created player never lights the screen on its own.
     p.keepScreenOnWhilePlaying = false;
+    // NEVER OUTLIVE THE SCREEN. This app is a video player, not a music player:
+    // the episode is expected to stop when the phone is locked, and the config
+    // plugin deliberately does NOT enable background playback. Stated here as
+    // well because it is the native half of the rule `lib/player/pip.ts` owns.
+    p.staysActiveInBackground = false;
     applyTuning(p, tuningFor());
   });
 
@@ -1021,7 +1082,11 @@ useEffect(() => {
   const showCueAt = useCallback((playhead: number) => {
     const armed = pendingSeek.current != null || resumeSeekAfterFrameRef.current != null;
     const at = cueLookupTime(playhead, armed);
-    publishCue(at == null ? null : cueAtSync(cuesRef.current, at, subsDelayRef.current));
+    // A FRAME, not one cue: a sign and a voice line (or two voices) can be open
+    // at the same playhead, and the old single-cue lookup silently dropped all
+    // but the first. `buildSubtitleFrame` keeps the dialogue and stacks signs
+    // above it; see `lib/subtitles/frame.ts`.
+    publishCue(at == null ? null : buildSubtitleFrame(cuesRef.current, at, subsDelayRef.current));
   }, []);
 
 const applyResumePosition = useCallback((resumeAt: number) => {
@@ -1129,6 +1194,12 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // source unpins naturally. Re-proving the same extension (a quality
     // switch) writes nothing — `lastSavedExtRef` is the disk-write guard.
     const proven = sourcesRef.current[srcIndexRef.current];
+    // SESSION PROOF. A frame is the only fact the ledger trusts: it clears a
+    // skip this source may have picked up earlier (a provider that recovers
+    // mid-session is welcome back immediately) and makes it the first choice
+    // for every episode from here on. The per-anime write below stays the same
+    // disk-backed preference.
+    if (proven?.extId && noteSourcePlayed(proven.extId)) bumpLedger();
     if (proven?.extId && proven.extId !== lastSavedExtRef.current) {
       lastSavedExtRef.current = proven.extId;
       void saveSourcePref(animeId, proven.extId);
@@ -1159,7 +1230,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // the playhead backwards, the loop this file already documents.
     pendingSeek.current = null;
     applyResumePosition(resumeAt);
-  }, [applyResumePosition, clearFrameWatchdog, player, animeId, loadResumeOnce, showCueAt]);
+  }, [applyResumePosition, clearFrameWatchdog, player, animeId, loadResumeOnce, showCueAt, bumpLedger]);
 
   /**
    * Engine/decoder/buffer profile, resolved ONCE per mount.
@@ -1783,7 +1854,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         pickStartIndex(
           cached.sources,
           prefExtId,
-          defSource && defSource !== 'auto' ? defSource : null
+          defSource && defSource !== 'auto' ? defSource : null,
+          // Session proof first, session skips filtered — the same decision the
+          // fresh path makes, because a cached list is still a list the session
+          // has opinions about.
+          { proven: sessionProvenSource(), skipped: isSourceSkipped }
         )
       );
       setQualitySel(null);
@@ -1833,6 +1908,20 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         if (gen !== loadGenRef.current) return;
         setSources(r.sources);
         setFailedSources(r.failed ?? []);
+        // A resolve failure is the cheapest place to learn a source is blocked
+        // or rate-limited — it happens before any video, and on every open. Only
+        // ENVIRONMENTAL reasons count (`tripKindForResolveFailure`); "no
+        // mapping" is a fact about this title and must not hide the provider
+        // from the next anime.
+        let tripped = false;
+        for (const f of r.failed ?? []) {
+          const kind = tripKindForResolveFailure(f.reason);
+          if (kind) {
+            tripSource(f.id, kind, f.reason);
+            tripped = true;
+          }
+        }
+        if (tripped) bumpLedger();
         // A new resolve is a new mint of signed urls — every source's refresh
         // budget resets with it.
         refreshedRef.current = new Set();
@@ -1850,7 +1939,8 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           pickStartIndex(
             r.sources,
             prefExtId,
-            defSource && defSource !== 'auto' ? defSource : null
+            defSource && defSource !== 'auto' ? defSource : null,
+            { proven: sessionProvenSource(), skipped: isSourceSkipped }
           )
         );
         setQualitySel(null);
@@ -1898,6 +1988,17 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         void loadPositions(animeId).then((resume) => setResumePositions(resume)).catch(() => {});
         throw new Error('No sources installed. Add an extension repo in Settings.');
       }
+      /**
+       * THE PROBE LIST — installed sources MINUS the ones this session burned.
+       *
+       * Not asking is the whole point: an ISP-blocked or rate-limited host costs
+       * its full deadline on every open, and asking again cannot change the
+       * answer. If nothing is left, everything is probed anyway — the ledger is
+       * an ordering opinion, never a lock. The episode-list fetch below still
+       * uses the full registry: a source that cannot play can still list.
+       */
+      const liveReg = reg.filter((e) => !isSourceSkipped(e.id));
+      const probeReg = liveReg.length ? liveReg : reg;
       // Kick the episode-list fetch off in parallel with the resolve so the
       // panel populates as soon as the stream is ready instead of after it.
       // The extension caches per-anime, so a title already opened on the
@@ -1956,7 +2057,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // (every extension probed for this episode) is not repeated for a list
       // this device resolved minutes ago.
       if (!cached) {
-        const resolvePromise = resolveEpisode(reg, animeId, epNum, m.idMal ?? null, {
+        const resolvePromise = resolveEpisode(probeReg, animeId, epNum, m.idMal ?? null, {
           // Search-keyword sources (anikoto family) map anilist id via keyword
           // + catalog-id equality; romaji first (closest to MAL titles).
           titles: [m.title?.romaji, m.title?.english].filter(
@@ -1965,7 +2066,19 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         });
         const verdict = await resolveInTwoWindows(resolvePromise, 'No source answered in time');
         if (verdict.kind === 'failed') throw verdict.error;
-        applyResolve(verdict.value);
+        const resolved = verdict.value;
+        if (liveReg.length) {
+          // A skipped provider was never asked, so it is absent from `failed`
+          // too. The picker still explains it — faded, with the reason — rather
+          // than pretending the extension is not installed.
+          resolved.failed = [
+            ...reg
+              .filter((e) => isSourceSkipped(e.id))
+              .map((e) => ({ id: e.id, reason: 'skipped this session' })),
+            ...resolved.failed,
+          ];
+        }
+        applyResolve(resolved);
       }
       // The episode panel is populated by the parallel fire-and-forget above,
       // so a slow stream resolve no longer gates it.
@@ -1988,7 +2101,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         loadBusyRef.current = false;
       }
     }
-  }, [animeId, epNum, linkOk, queryClient]);
+  }, [animeId, epNum, linkOk, queryClient, bumpLedger]);
 
   useEffect(() => {
     // `linkOk` rather than an isFinite check. `Number.isFinite(NaN)` is false so
@@ -2177,6 +2290,15 @@ if (pendingSeek.current == null) {
 
     const i = srcIndexRef.current;
     const failing = sourcesRef.current[i];
+    // A PLAYBACK VERDICT FOR THE LEDGER. The 429 branch above has already taken
+    // its one in-place retry, so anything reaching here is a repeat failure and
+    // counts. `tripKindForPlaybackFailure` deliberately returns null for an
+    // expired signed URL (refresh + re-resolve is the remedy, the source is
+    // fine), for an offline device, and for an unrecognised message.
+    if (reason) {
+      const kind = tripKindForPlaybackFailure(reason);
+      if (kind && tripSource(failing?.extId, kind)) bumpLedger();
+    }
 
     // SELF-HEAL BEFORE HOPPING. A signed source (the extension decides; the
     // player only sees a refresh hook) probed alive at resolve time and failing
@@ -2234,11 +2356,12 @@ if (pendingSeek.current == null) {
           refreshBusyRef.current = false;
         }
         // Null or thrown: continue the walk that was interrupted.
-        if (i + 1 < sourcesRef.current.length) {
-          const carried = qualityForSource(i + 1);
+        const nextRow = nextWalkIndex(sourcesRef.current, i, isSourceSkipped);
+        if (nextRow != null) {
+          const carried = qualityForSource(nextRow);
           qualitySelRef.current = carried;
           setQualitySel(carried);
-          setSrcIndex(i + 1);
+          setSrcIndex(nextRow);
         } else {
           wrapLoad();
         }
@@ -2252,13 +2375,16 @@ if (pendingSeek.current == null) {
     // the episode. If the next source offers the same label the hop lands on
     // that variant directly (one replace, no master dance); if it does not, the
     // lock is dropped as before and Auto plays the next server.
-    const carried = i + 1 < sourcesRef.current.length ? qualityForSource(i + 1) : null;
+    // THE WALK STEPS OVER WHAT THE SESSION HAS WRITTEN OFF, and keeps the rank
+    // order for everything else (`nextWalkIndex`).
+    const nextRow = nextWalkIndex(sourcesRef.current, i, isSourceSkipped);
+    const carried = nextRow != null ? qualityForSource(nextRow) : null;
     qualitySelRef.current = carried;
     setQualitySel(carried);
     // Resume exactly where the viewer was, not at the stored position. The
     // stored one is up to `SAVE_EVERY` seconds behind, and a source that dies
     // mid-scene should not restart the scene.
-    if (i + 1 < sourcesRef.current.length) {
+    if (nextRow != null) {
       // Preserve an already-pending target (e.g. a reconnect position) rather than
 // overwriting it with a playhead that may have been reset to 0 by a failed
 // replaceAsync. Only adopt the current playhead when nothing is pending.
@@ -2266,11 +2392,11 @@ if (pendingSeek.current == null) {
   const at = player.currentTime;
   if (at > 0) pendingSeek.current = at;
 }
-      setSrcIndex(i + 1);
+      setSrcIndex(nextRow);
     } else {
       wrapLoad();
     }
-  }, [load, player, clearFrameWatchdog, animeId, epNum, qualityForSource]);
+  }, [load, player, clearFrameWatchdog, animeId, epNum, qualityForSource, bumpLedger]);
 
   failoverRef.current = failover;
 
@@ -3176,6 +3302,12 @@ if (pendingSeek.current == null) {
       if (key === '__refresh') {
         const currentExt = sourcesRef.current[srcIndexRef.current]?.extId;
         if (currentExt) void saveSourcePref(animeId, currentExt);
+        // AN EXPLICIT REFRESH IS THE USER ASKING AGAIN, so every session verdict
+        // goes back on trial (the proof is kept). A skipped provider is not even
+        // probed while marked, and this is the only way to get its rows back
+        // without restarting the app.
+        clearSourceTrips();
+        bumpLedger();
         // Preserve an already-pending target (e.g. a reconnect position) rather than
 // overwriting it with a playhead that may have been reset to 0 by a failed
 // replaceAsync. Only adopt the current playhead when nothing is pending.
@@ -3212,11 +3344,20 @@ if (pendingSeek.current == null) {
       // later, but a viewer who picks Mega explicitly wants Mega even if this
       // episode's Mega row happens to be dead and the walk hops on.
       const picked = sourcesRef.current[i];
+      // AN EXPLICIT PICK BEATS THE SESSION'S OPINION — ONCE. A faded row is one
+      // the ledger has written off; tapping it is the viewer saying "try it
+      // again now", so the skip is cleared before the load. If it fails, the
+      // walk trips it again. The Settings default deliberately does NOT do this:
+      // it is a standing preference, not a "try now" command.
+      if (picked?.extId) {
+        clearSourceTrip(picked.extId);
+        bumpLedger();
+      }
       lastSavedExtRef.current = picked?.extId ?? null;
       void saveSourcePref(animeId, picked?.extId);
       setMenu(null);
     },
-    [player, animeId, load, qualityForSource]
+    [player, animeId, load, qualityForSource, bumpLedger]
   );
 
   // -------------------------------------------------------------------------
@@ -3402,6 +3543,82 @@ if (pendingSeek.current == null) {
     });
     return () => sub.remove();
   }, [readHealth, showCueAt, player]);
+
+  /**
+   * AWAY WITHOUT PIP MEANS PAUSED.
+   *
+   * The policy and its reasoning live in `lib/player/pip.ts`; this effect is the
+   * wiring. Two details belong here:
+   *
+   *  • The handoff window. An automatic PiP handoff is not synchronous with the
+   *    `AppState` change, so acting on 'background' immediately would pause the
+   *    video the OS is about to float. The timer gives the handoff its window
+   *    (`PIP_HANDOFF_GRACE_MS`) and does nothing if PiP claimed the player first.
+   *  • 'inactive' is not away. On iOS a pulled-down notification shade or control
+   *    centre produces it while the player is still on screen; pausing for that
+   *    would stop the episode every time the viewer checks the time.
+   *
+   * The play INTENT is dropped along with the pause. Otherwise a failover, a
+   * token refresh or the return to the foreground would each be free to press
+   * play again on a decision the viewer never made.
+   */
+  useEffect(() => {
+    const clearHandoff = () => {
+      if (pipHandoffTimerRef.current) clearTimeout(pipHandoffTimerRef.current);
+      pipHandoffTimerRef.current = null;
+    };
+
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        backgroundHoldRef.current = false;
+        clearHandoff();
+        // A pending PiP-exit check belongs to the close case only; coming back
+        // to the app answers it the other way.
+        if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
+        pipExitTimerRef.current = null;
+        return;
+      }
+      if (next !== 'background' || pipActiveRef.current) return;
+      clearHandoff();
+      pipHandoffTimerRef.current = setTimeout(() => {
+        pipHandoffTimerRef.current = null;
+        const stage = playbackStage(appActiveRef.current, pipActiveRef.current);
+        if (!shouldHoldPlayback(stage)) return;
+        backgroundHoldRef.current = true;
+        desiredPlayingRef.current = false;
+        player.pause();
+      }, PIP_HANDOFF_GRACE_MS);
+    });
+
+    return () => {
+      clearHandoff();
+      if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
+      pipExitTimerRef.current = null;
+      sub.remove();
+    };
+  }, [player]);
+
+  /**
+   * A REMOTE PLAY IS NOT THE VIEWER'S PLAY.
+   *
+   * `expo-video` keeps a media session for the player, so a headset's play
+   * button is a `play()` that arrives with no gesture behind it — the device
+   * report was an episode starting from a phone with the screen off after one
+   * earbud tap. The engine's own background pause cannot stop that, because the
+   * remote command is exactly what it is being asked to obey. Once this app has
+   * decided to hold (see the effect above), any play that arrives while it is
+   * still backgrounded with no PiP window is undone immediately. A real gesture
+   * cannot be affected: the app is not on screen to receive one.
+   */
+  useEffect(() => {
+    const sub = player.addListener('playingChange', ({ isPlaying }) => {
+      if (!isPlaying || !backgroundHoldRef.current) return;
+      if (!shouldHoldPlayback(playbackStage(appActiveRef.current, pipActiveRef.current))) return;
+      player.pause();
+      desiredPlayingRef.current = false;
+    });
+    return () => sub.remove();
+  }, [player]);
 
   // -------------------------------------------------------------------------
   // Subtitles
@@ -3642,6 +3859,45 @@ if (pendingSeek.current == null) {
       if (__DEV__) console.warn('[player] picture in picture unavailable:', e);
     });
   }, []);
+
+  /**
+   * PIP START is a handoff, not a screen: the system owns the picture now.
+   *
+   * The native side hides the app's views while the window is up, so nothing
+   * here draws anything — this exists so the transport policy knows playback is
+   * allowed to continue, and so the player comes back in its at-rest
+   * presentation (no toolbar frozen mid-open) when the viewer expands it again.
+   */
+  const onPipStart = useCallback(() => {
+    pipActiveRef.current = true;
+    backgroundHoldRef.current = false;
+    if (pipHandoffTimerRef.current) clearTimeout(pipHandoffTimerRef.current);
+    pipHandoffTimerRef.current = null;
+    showControlsRef.current = false;
+    setChromeVisible(false);
+    setMenu(null);
+  }, []);
+
+  /**
+   * PIP STOP is either an expand (back to the player) or a close (the window is
+   * gone but the app is still away). They look identical here, and the expand's
+   * `AppState` change lands AFTER the callback, so the decision is deferred: if
+   * the app is still backgrounded a moment later, this was a close and playback
+   * has nowhere to be seen.
+   */
+  const onPipStop = useCallback(() => {
+    pipActiveRef.current = false;
+    if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
+    pipExitTimerRef.current = setTimeout(() => {
+      pipExitTimerRef.current = null;
+      if (!shouldHoldPlayback(playbackStage(AppState.currentState === 'active', pipActiveRef.current))) {
+        return;
+      }
+      backgroundHoldRef.current = true;
+      desiredPlayingRef.current = false;
+      player.pause();
+    }, PIP_HANDOFF_GRACE_MS);
+  }, [player]);
 
   const onToggleLock = useCallback(() => {
     setLocked((l) => {
@@ -4048,18 +4304,35 @@ if (pendingSeek.current == null) {
   }, [mergedQualities, qualitySel, qualityPhase]);
 
   const sourceRows: MenuRow[] = useMemo(() => {
+    // READ, not merely listed: the ledger lives outside React, so a verdict
+    // written by `failover` is invisible to this memo without the counter. The
+    // reference is what makes the dependency real instead of a lint nit.
+    void ledgerTick;
     const rows: MenuRow[] = sources.map((s, i) => ({
       key: String(i),
       label: s.quality ? `${s.quality} — source ${i + 1}` : `Source ${i + 1}`,
-      hint: i === srcIndex ? 'playing' : undefined,
+      hint: i === srcIndex ? 'playing' : sourceSkipHint(s.extId),
       selected: i === srcIndex,
+      // Faded, not disabled: the session is skipping it, and one tap is the
+      // explicit override (see `onPickSource`). A disabled row would strand a
+      // provider that has recovered but has not played yet.
+      muted: !!readSourceTrip(s.extId),
     }));
     // Providers that did not contribute sources (e.g. Katana/bingr blocked by
     // the network) still show up, faded, with the reason — so the sheet
     // explains WHY a source is missing instead of pretending it never existed.
     const nameFor = (id: string) =>
       id === 'filmu' ? 'Katana' : id === 'mega' ? 'Mega' : id;
+    // ONE ROW PER PROVIDER. `MenuRow.key` becomes the panel list's React key,
+    // so a provider reported twice is a duplicated key — React reports it as an
+    // ERROR and blames the whole row list (device report, 22 Nov: opening
+    // Source while an episode played showed "two children with the same key,
+    // failed-filmu"). The registry dedupes by id as well; this is the picker
+    // keeping its own promise rather than trusting a caller.
+    const seenFailed = new Set<string>();
     failedSources.forEach((f) => {
+      if (seenFailed.has(f.id)) return;
+      seenFailed.add(f.id);
       rows.push({
         key: `failed-${f.id}`,
         label: nameFor(f.id),
@@ -4076,7 +4349,7 @@ if (pendingSeek.current == null) {
       });
     }
     return rows;
-  }, [sources, srcIndex, failedSources]);
+  }, [sources, srcIndex, failedSources, ledgerTick]);
 
   const subRows: MenuRow[] = useMemo(() => {
     const rows: MenuRow[] = [
@@ -4582,6 +4855,13 @@ if (pendingSeek.current == null) {
         nativeControls={false}
         contentFit="contain"
         allowsPictureInPicture={pipSupported}
+        // LEAVING THE APP WHILE PLAYING HAND THE VIDEO TO THE SYSTEM. Android 12+
+        // and iOS enter PiP on their own here; older Android ignores the prop and
+        // the background rule above pauses instead, which is the correct
+        // fallback rather than a silent audio stream behind a locked screen.
+        startsPictureInPictureAutomatically={shouldAutoEnterPip(pipSupported, playing)}
+        onPictureInPictureStart={onPipStart}
+        onPictureInPictureStop={onPipStop}
         surfaceType={tuning.surfaceType}
         onFirstFrameRender={onFirstFrame}
       />

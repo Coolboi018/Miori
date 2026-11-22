@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
-import type { Cue } from '@/lib/subtitles/vtt';
-import { subtitleBottomOffset, type ResolvedSubtitleStyle } from '@/lib/subtitles/style';
+import { SUBTITLE_STACK_GAP, subtitleBottomOffset, type ResolvedSubtitleStyle } from '@/lib/subtitles/style';
+import type { SubtitleFrame } from '@/lib/subtitles/frame';
 import { font } from '@/lib/ui/tokens';
 
 // Custom subtitle overlay.
@@ -12,10 +12,23 @@ import { font } from '@/lib/ui/tokens';
 // `VerticalPlayerScreen` in `legacy/` is the only other caller and passes
 // `defaultSubtitleStyle()` explicitly.
 //
+// `frame` is the WHOLE picture at this instant, not one line: a sign block and
+// a dialogue block (see `lib/subtitles/frame.ts`). It replaced a single `cue`
+// prop on 22 Nov because a track can have several cues open at once — a sign
+// translation beside a spoken line, two voices overlapping — and the overlay
+// only ever painted the first one it was handed. The blocks arrive ordered top
+// to bottom, so this component's layout is a plain column: whatever the frame
+// says is above is above.
+//
+// Both blocks share the resolved style. That is deliberate: a sign is the same
+// text over the same video, and giving it a second size/colour ladder would be
+// a second set of settings for a case most viewers never see. The gap and the
+// order are what separate them.
+//
 // GEOMETRY, and why this component measures instead of being told.
 //
-// The wrapper is always mounted (a cue is null between lines, and the screen is
-// still laid out), and it reports its own height. That height — not a window
+// The wrapper is always mounted (a frame is null between lines, and the screen
+// is still laid out), and it reports its own height. That height — not a window
 // dimension and not a number derived in the player — is what the position
 // fraction is applied to. The first version of the slider was handed
 // `winH - barH - insets.top - TOP_BAR_TOTAL` from `PlayerScreen`, which is a
@@ -29,7 +42,9 @@ import { font } from '@/lib/ui/tokens';
 //
 // The cue box also reports its own height, because 100% has to mean "the top
 // line is still visible": `bottom = frac * span` alone puts the box's bottom
-// edge on the container's top edge.
+// edge on the container's top edge. With two blocks that measurement is the
+// WHOLE STACK — signs included — so a sign never floats off the top of the
+// frame at 100% while the dialogue stays put.
 //
 // `bottomOffset` is the bottom chrome's MEASURED height, and it is only the
 // FIRST-FRAME fallback: before the stage has measured itself there is no band
@@ -45,13 +60,14 @@ import { font } from '@/lib/ui/tokens';
 // (`SUBTITLE_DEFAULT_FRAC` of the measured band); only this fallback keeps the
 // prop.
 export function SubtitleOverlay({
-  cue,
+  frame,
   style,
   bottomOffset = 48,
   topOffset = 0,
   sideInset = 0,
 }: {
-  cue: Cue | null;
+  /** Everything on screen right now: sign block(s) above, dialogue below. */
+  frame: SubtitleFrame | null;
   style: ResolvedSubtitleStyle;
   /**
    * The bottom chrome's measured height — the ONE-FRAME fallback the overlay
@@ -72,8 +88,8 @@ export function SubtitleOverlay({
   /**
    * Two measurements, both in points, both compared before written: `onLayout`
    * fires on more occasions than one would think (font load, rotation, inset
-   * settle, a cue growing a line) and an unguarded write re-renders the player
-   * for a sub-point change nobody can see.
+   * settle, a cue growing a line, a sign appearing above it) and an unguarded
+   * write re-renders the player for a sub-point change nobody can see.
    */
   const [stageH, setStageH] = useState(0);
   const [cueH, setCueH] = useState(0);
@@ -105,9 +121,11 @@ export function SubtitleOverlay({
         })
       : bottomOffset;
 
+  const blocks = frame?.blocks ?? [];
+
   return (
     <View style={styles.stage} pointerEvents="none" onLayout={onStage}>
-      {cue ? (
+      {blocks.length ? (
         <View
           style={[
             styles.box,
@@ -124,31 +142,38 @@ export function SubtitleOverlay({
           ]}
           onLayout={onCue}
         >
-          <Text
-            style={[
-              styles.text,
-              {
-                fontSize: style.fontSize,
-                lineHeight: style.lineHeight,
-                color: style.color,
-                ...(plate
-                  ? {
-                      backgroundColor: plate.backgroundColor,
-                      borderRadius: plate.borderRadius,
-                    }
-                  : null),
-                ...(shadow
-                  ? {
-                      textShadowColor: shadow.textShadowColor,
-                      textShadowOffset: shadow.textShadowOffset,
-                      textShadowRadius: shadow.textShadowRadius,
-                    }
-                  : null),
-              },
-            ]}
-          >
-            {cue.text}
-          </Text>
+          {blocks.map((block, i) => (
+            <Text
+              key={`${block.kind}-${i}`}
+              style={[
+                styles.text,
+                {
+                  fontSize: style.fontSize,
+                  lineHeight: style.lineHeight,
+                  color: style.color,
+                  ...(plate
+                    ? {
+                        backgroundColor: plate.backgroundColor,
+                        borderRadius: plate.borderRadius,
+                      }
+                    : null),
+                  ...(shadow
+                    ? {
+                        textShadowColor: shadow.textShadowColor,
+                        textShadowOffset: shadow.textShadowOffset,
+                        textShadowRadius: shadow.textShadowRadius,
+                      }
+                    : null),
+                },
+                // One gap, between blocks only — never above the first one,
+                // which would push the whole frame's measured height out and
+                // move the dialogue down by the sign's margin.
+                i > 0 ? { marginTop: SUBTITLE_STACK_GAP } : null,
+              ]}
+            >
+              {block.text}
+            </Text>
+          ))}
         </View>
       ) : null}
     </View>

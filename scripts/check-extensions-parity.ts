@@ -31,6 +31,24 @@ for (const file of index.manifests as string[]) {
   ok++;
 }
 
+// --- filmu: every sub stream is its own row -------------------------------
+// The picker used to show a single "Katana" row for a provider whose own player
+// lists Katana/Ronin/Shogun/Ninja, because `/api/sources` was read as
+// `streams[0]`. These assert the shipped source walks the whole matrix instead,
+// labels rows by server, drops dub audio, and that a refresh stays on its row.
+const filmuSrc = readFileSync(join(process.cwd(), 'lib/extensions/filmu/index.ts'), 'utf8');
+const subStreamRules: Array<[string, boolean]> = [
+  ['filmu mints every decoded sub stream', /st\.streams\.forEach/.test(filmuSrc)],
+  ['...never just the first one again', !/\.streams\[0\]/.test(filmuSrc)],
+  ['...labels a row by its server', /serverLabel\(serverId\)/.test(filmuSrc)],
+  ['...drops dub audio from the sub matrix', /\/dub\/i\.test\(serverId\)/.test(filmuSrc)],
+  ['...and a refresh re-mints its OWN row', /s\.quality === qualityLabel/.test(filmuSrc)],
+];
+for (const [name, pass] of subStreamRules) {
+  console.log(`  ${pass ? 'ok  ' : 'FAIL'}  ${name}`);
+  if (!pass) fail++;
+}
+
 console.log(`\n${ok} converted, ${fail} failed`);
 if (fail) process.exit(1);
 console.log('parity: structural OK');

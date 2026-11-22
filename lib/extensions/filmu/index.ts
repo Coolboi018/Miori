@@ -78,6 +78,26 @@ const UA =
 /** The `/v/` VTT routes 404 to ANY fetch without this Referer, 200 with it. */
 const SUB_HEADERS = { 'User-Agent': UA, Referer: `${SITE}/` };
 
+/** The only shape a playable stream token has ever carried. */
+const STREAM_URL = /^https:\/\/hikari\.streamrip\.fun\/p\/[A-Za-z0-9_-]+$/;
+
+/**
+ * A server id -> the picker's row name.
+ *
+ * Their player names its servers `katana-sub`, `katana-dub`, `katana-multi`,
+ * `ronin`, `shogun`, `ninja`; the app used to label EVERY stream "Katana",
+ * which is one of those names and made a five-row provider look like a
+ * one-row one. `katana-sub` keeps the familiar "Katana Sub", and the rest
+ * arrive as "Ronin" / "Shogun" / "Ninja".
+ */
+function serverLabel(id: string): string | undefined {
+  const clean = id.trim().toLowerCase();
+  if (!clean) return undefined;
+  const parts = clean.split(/[-_]+/).filter(Boolean);
+  if (!parts.length) return undefined;
+  return parts.map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+}
+
 const STREAMS_TTL = 5 * 60 * 1000; // signed tokens live ~8min client-side; stay under
 const EPISODES_TTL = 60 * 60 * 1000;
 // Chunks are the loop's SAFETY BOUND, not its stopping condition —
@@ -377,14 +397,16 @@ export function createFilmuExtension(): Extension {
     url: string,
     subs: SubtitleTrack[] = [],
     /** The watch page's parsed data — supplies the intro/ending markers. */
-    skip: WatchPageData | null = null
+    skip: WatchPageData | null = null,
+    /** The row's name: the bingr server this stream came from. */
+    qualityLabel = 'Katana'
   ): WatchSource {
     return {
       url,
       // Asserted, never derived, and why: the token URL contains no `.m3u8`
       // and it is an HLS master feeding a 1080/730/480 ladder. See header.
       container: 'hls' as const,
-      quality: 'Katana',
+      quality: qualityLabel,
       headers: { 'User-Agent': UA },
       intro: skip?.intro ?? null,
       outro: skip?.outro ?? null,
@@ -398,16 +420,20 @@ export function createFilmuExtension(): Extension {
        */
       refresh: async () => {
         const fresh = await probeRanked(anilistId, ep).catch(() => [] as WatchSource[]);
-        return fresh[0] ?? null;
+        // SAME ROW, not merely "a source". With several sub streams in the
+        // list a blind `fresh[0]` would hand this row another server's token —
+        // the player only splices a refresh whose url CHANGED, so that swap
+        // would land as if it were a re-mint of THIS stream.
+        return fresh.find((s) => s.quality === qualityLabel) ?? fresh[0] ?? null;
       },
     };
   }
 
   /**
-   * The `/api/sources` state for THIS page's session token. `resolve()` maps
-   * `streams[0].subtitles` onto the source (each with the Referer headers the
-   * `/v/` routes demand) and, when the answer carries a fresh stream token,
-   * prefers it as the played url.
+   * The `/api/sources` state for THIS page's session token. `resolve()` walks
+   * EVERY entry of `streams` — one row per sub server — and maps each row's own
+   * subtitles onto it (each with the Referer headers the `/v/` routes demand),
+   * preferring those fresh stream tokens over the page-scraped one.
    *
    * Fail-closed: a bad shape, a failed decode or an empty `streams` throws —
    * the caller keeps the SSR-page source, which plays fine and merely ships no
@@ -481,20 +507,51 @@ export function createFilmuExtension(): Extension {
     if (page.session) {
       try {
         const st = await apiSources(anilistId, ep, page.session);
-        const st0 = st.streams[0];
-        if (
-          st0?.url &&
-          /^https:\/\/hikari\.streamrip\.fun\/p\/[A-Za-z0-9_-]+$/.test(st0.url)
-        ) {
-          const probe = await probeSource(st0.url, 'hls', { 'User-Agent': UA });
-          if (probe.alive) {
-            const subs = toSubTracks(st0);
-            const fresh = mintSource(anilistId, ep, st0.url, subs, page);
-            // Skip the enriched url in `fresh` if the page minted the SAME
-            // token — the mint window does that (see the header). Dedupe on
-            // the url so the list never doubles.
-            return [fresh, ...ranked.filter((s) => s.url !== fresh.url)];
-          }
+        // EVERY SUB STREAM, NOT JUST THE FIRST. `?audio=sub` answers with the
+        // whole sub matrix — the servers their own player lists as Katana /
+        // Ronin / Shogun / Ninja — and `streams[0]` used to be taken while the
+        // rest were thrown away. Each stream is its own row now, carrying ITS
+        // OWN subtitles: a `/v/` track is bound to the token it arrived with,
+        // so subs cannot be borrowed across servers.
+        //
+        // Labels come from the SERVER LIST when it aligns one-to-one with the
+        // streams (the usual shape), otherwise from the stream's own label, and
+        // "Katana" only when nothing distinguishes it — naming a row after a
+        // server it is not would be worse than the generic name.
+        const aligned = st.servers?.length === st.streams.length;
+        const seenUrl = new Set<string>();
+        const candidates: { url: string; subs: SubtitleTrack[]; label: string }[] = [];
+        st.streams.forEach((s, i) => {
+          if (!s?.url || !STREAM_URL.test(s.url) || seenUrl.has(s.url)) return;
+          const serverId = aligned ? (st.servers?.[i]?.id ?? '') : '';
+          // SUB AUDIO ONLY. The request already says `audio=sub`; a dub server
+          // appearing in the matrix would play the wrong voice track under
+          // subtitle lines, so it is dropped rather than offered.
+          if (/dub/i.test(serverId)) return;
+          seenUrl.add(s.url);
+          candidates.push({
+            url: s.url,
+            subs: toSubTracks(s),
+            label: serverLabel(serverId) ?? s.label ?? 'Katana',
+          });
+        });
+        // Probe together: N servers must cost one round-trip, not N.
+        const alive = await Promise.all(
+          candidates.map((c) =>
+            probeSource(c.url, 'hls', { 'User-Agent': UA })
+              .then((p) => p.alive === true)
+              .catch(() => false)
+          )
+        );
+        const minted = candidates
+          .filter((_, i) => alive[i])
+          .map((c) => mintSource(anilistId, ep, c.url, c.subs, page, c.label));
+        if (minted.length) {
+          // Drop the page-scraped rows that carry the SAME token — the mint
+          // window re-serves it (see the header) — keeping the minted row,
+          // which is the one with subtitles attached.
+          const freshUrls = new Set(minted.map((s) => s.url));
+          return [...minted, ...ranked.filter((s) => !freshUrls.has(s.url))];
         }
       } catch {
         /* the page source stays; Mega remains the neighbour with subs */

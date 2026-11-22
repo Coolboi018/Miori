@@ -1,10 +1,26 @@
 // Splash timing — the ONE place these numbers live.
 //
-// Pure data, like `tokens.ts`: the component, the root layout's watchdog and
+// Pure data, like `tokens.ts`: the player, the root layout and
 // `scripts/check-splash.ts` all read the same constants, so "the splash feels
 // slow" is a one-line change here rather than a hunt through an animation, and
-// the invariants (the overlay always ends, the backstop is always later than the
-// animation) are assertable instead of hoped for.
+// the invariants are assertable instead of hoped for.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// THE LAUNCH ANIMATION IS NATIVE NOW (22 Nov)
+// ═══════════════════════════════════════════════════════════════════════════
+// The icon animation is an Android AnimatedVectorDrawable (`Logo/`), played by
+// the OS splash window itself: outline draws, silver fill arrives, the whole
+// mark settles — then it BREATHES until the app is ready. There is no in-app
+// splash overlay; the constants below that describe one are the parked
+// timeline of the overlay this replaced (still used by `AnimatedSplash.tsx`,
+// which is no longer mounted).
+//
+// `nativeAnimationMs` is the load-bearing new number: it must equal the intro
+// the AVD actually finishes at, because it is what the plugin gives Android as
+// `windowSplashScreenAnimationDuration`. `scripts/check-splash.ts` reads the
+// animator XML and asserts all three agree, so the 22 Nov bug — a 1400ms AVD
+// under a system budget of ~1000ms, frozen mid-zoom with the fill half-drawn —
+// cannot come back silently.
 //
 // The budget is deliberately under a second. A splash is not doing work at this
 // point — fonts and the persisted cache were already read behind the native
@@ -63,6 +79,20 @@ export const SPLASH = {
    * common path.
    */
   decodeFallbackMs: 240,
+  /**
+   * HOW LONG THE NATIVE ICON ANIMATION'S INTRO LASTS, in milliseconds.
+   *
+   * The longest intro endpoint in `Logo/miori_*xml` (the settle and the fill
+   * both land at 880). Android advises keeping a splash icon animation at or
+   * under ~1000ms; anything longer is cut at an arbitrary frame, which is
+   * exactly what the previous 1400ms timeline produced — a logo frozen
+   * mid-zoom with its silver fill barely half-opaque.
+   *
+   * The plugin writes this into `windowSplashScreenAnimationDuration`, and the
+   * AVD's <b>idle pulse</b> starts where this ends and repeats forever, so a
+   * slow start never shows a still frame.
+   */
+  nativeAnimationMs: 880,
   /**
    * The native splash's OWN exit fade, handed to `SplashScreen.setOptions`.
    *

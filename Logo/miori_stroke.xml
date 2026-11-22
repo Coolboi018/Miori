@@ -1,23 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    THE OUTLINE: draws itself, then hands over to the solid fill.
+
+    Every animator here finishes at 880ms, inside Android's ~1000ms guidance for
+    a splash icon animation (a longer one gets cut, and a cut leaves a
+    half-drawn logo on screen). The end of the intro is ALSO the number in
+    `lib/ui/splash.ts` (`nativeAnimationMs`) and in the plugin's
+    `windowSplashScreenAnimationDuration` — `scripts/check-splash.ts` asserts
+    the three agree.
+
+    THE FIRST ANIMATOR HOLDS strokeAlpha AT 1 FOR THE WHOLE DRAW. The drawable's
+    static `strokeAlpha` is 0 because the finished logo has no outline, but the
+    intro needs the outline visible while `trimPathEnd` travels. An animator
+    that simply faded from 1 at 600ms would leave the first 600ms invisible
+    (the property would still be at its static 0), so the hold is not padding:
+    without it the "draw" happens on an invisible stroke.
+-->
 <set xmlns:android="http://schemas.android.com/apk/res/android"
     android:ordering="together">
 
-    <!-- 1) outline draws itself: 0 - 900 ms -->
+    <!-- 1) the outline is visible from frame zero, and stays visible while it draws -->
+    <objectAnimator
+        android:propertyName="strokeAlpha"
+        android:valueFrom="1"
+        android:valueTo="1"
+        android:valueType="floatType"
+        android:duration="600"
+        android:interpolator="@android:interpolator/linear" />
+
+    <!-- 2) the outline draws itself: 0 - 680 ms -->
     <objectAnimator
         android:propertyName="trimPathEnd"
         android:valueFrom="0"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="900"
+        android:duration="680"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
 
-    <!-- 3) outline fades away: 1000 - 1400 ms -->
+    <!-- 3) the outline fades away as the silver fill arrives: 600 - 880 ms -->
     <objectAnimator
         android:propertyName="strokeAlpha"
         android:valueFrom="1"
         android:valueTo="0"
         android:valueType="floatType"
-        android:startOffset="1000"
-        android:duration="400"
+        android:startOffset="600"
+        android:duration="280"
         android:interpolator="@android:interpolator/linear" />
 </set>

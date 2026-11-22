@@ -446,6 +446,21 @@ console.log('\nchrome layout — the settings panel');
     /right:\s*0/.test(panelSrcItem) && /marginRight:\s*insets\.right \+ 10/.test(panelSrcItem) && /borderRadius:\s*26/.test(panelSrcItem),
     'panel is not a right-anchored floating card'
   );
+  // A duplicated provider is a duplicated `MenuRow.key`, and React reports the
+  // whole row list for it ("two children with the same key, failed-filmu", seen
+  // on device when Source was opened mid-episode). The picker must dedupe; and
+  // so must the registry, or two probes produce the duplicate in the first place.
+  check(
+    'the source picker keeps one row per provider (a duplicate key errors the panel)',
+    /seenFailed\.has\(f\.id\)/.test(screenSrc) && /seenFailed\.add\(f\.id\)/.test(screenSrc),
+    'failed-source rows are pushed without a per-provider guard'
+  );
+  const registrySrc = read('lib/extensions/registry.ts');
+  check(
+    'the registry cannot register or report the same provider twice',
+    /seen\.has\(ext\.id\)/.test(registrySrc) && /seenIds\.has\(id\)/.test(registrySrc),
+    'a duplicate provider id can reach resolve and the picker'
+  );
 }
 
 console.log(

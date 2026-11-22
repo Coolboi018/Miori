@@ -40,12 +40,24 @@ import {
 import { Slider } from '@/components/ui/Slider';
 import { useSetting, useSetSetting } from '@/lib/settings/useSetting';
 import { SUBTITLE_TYPEGRAPHY, resolveSubtitleStyle } from '@/lib/subtitles/style';
-import { cueAt, formatSubtitleDelay, type Cue } from '@/lib/subtitles/vtt';
+import { formatSubtitleDelay, type Cue } from '@/lib/subtitles/vtt';
+import { buildSubtitleFrame } from '@/lib/subtitles/frame';
 import { font, radii, spacing } from '@/lib/ui/tokens';
 import { useTheme } from '@/lib/ui/useTheme';
 
-/** Two seconds of a real-shaped cue — long enough to wrap, short enough to fit. */
-const SAMPLE: Cue[] = [{ start: 0, end: 10, text: 'It was not the end of the world,\nand she knew it.' }];
+/**
+ * A real-shaped pair of overlapping cues: a translated sign and a spoken line.
+ *
+ * Deliberately LAYERED, because that is what the preview has to show. A sample
+ * of one line would demonstrate the font and nothing about the question this
+ * page's reader actually has — whether the sign they are seeing over a voice
+ * line is going to bury it. The preview renders the same two-block frame the
+ * player does, sign above dialogue.
+ */
+const SAMPLE: Cue[] = [
+  { start: 0, end: 10, text: 'OPEN 24 HOURS', placement: 'top' },
+  { start: 0, end: 10, text: 'It was not the end of the world,\nand she knew it.' },
+];
 
 const SUBTITLE_COLOR_HEX: Record<SubtitleColorKey, string> = {
   white: '#ffffff',
@@ -71,11 +83,9 @@ export default function SubtitleSettings() {
     [size, position, subsPositionFrac, background, subsColor]
   );
 
-  // `cueAt` with a time inside the sample cue, so the preview renders through
-  // the SAME lookup the player uses. It is the boundary behaviour that was
-  // broken, and a preview that bypassed it would be a preview of a different
-  // player than the one that ships.
-  const cue = useMemo(() => cueAt(SAMPLE, 1), []);
+  // The SAME frame builder the player uses, at a time inside the sample cues,
+  // so the preview cannot show a layering the shipped player does not draw.
+  const previewFrame = useMemo(() => buildSubtitleFrame(SAMPLE, 1, 0), []);
 
   return (
     <SettingsPage title="Subtitles">
@@ -84,7 +94,7 @@ export default function SubtitleSettings() {
       <View style={[styles.preview, { backgroundColor: themeColor.bg.surface }]}>
         <Text style={[styles.previewLabel, { color: themeColor.text.muted }]}>PREVIEW</Text>
         <View style={styles.previewStage}>
-          <SubtitleOverlay cue={cue} style={style} bottomOffset={PREVIEW_BAR} />
+          <SubtitleOverlay frame={previewFrame} style={style} bottomOffset={PREVIEW_BAR} />
         </View>
       </View>
 

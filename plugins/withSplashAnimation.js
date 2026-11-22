@@ -7,13 +7,23 @@
 //       @drawable/... and @animator/...
 //   (c) run our style edit AFTER expo-splash-screen's, adding
 //       `windowSplashScreenAnimationDuration` (required for Android to actually
-//       play the animated icon).
+//       play the animated icon, and used by the system to time the exit).
+//
+// The duration is the INTRO, not the loop: the AVD's idle pulse repeats forever
+// and is stopped by the app hiding the splash, so declaring 880 lets the system
+// finish the entrance cleanly while a slow device keeps animating.
 const splashPlugin = require('expo-splash-screen/app.plugin.js').default;
 const { withAndroidStyles, withDangerousMod } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
-const ANIMATION_DURATION_MS = '1500';
+// The intro's real length. Must equal `SPLASH.nativeAnimationMs` and the last
+// non-looping animator endpoint in `Logo/miori_*xml` — `scripts/check-splash.ts`
+// asserts all three. 1500 used to be here, which is past Android's ~1000ms
+// splash-animation budget: the icon was frozen mid-zoom (fill half-drawn, outline
+// still up) instead of finishing. The AVD's idle pulse loops after this point,
+// so a slow start still looks alive.
+const ANIMATION_DURATION_MS = '880';
 
 // Files that make up the AVD, relative to project root.
 const AVD_FILES = [

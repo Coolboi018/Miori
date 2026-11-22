@@ -31,10 +31,20 @@
 // file existed. Nothing here can throw at startup, and nothing here is a "maybe
 // the API works": `usingDeviceVolume()` is the single answer every caller reads.
 //
+// AND THE PACKAGE IS NOT EVEN EVALUATED WHEN IT IS UNLINKED. The dynamic import
+// kept the app booting, but the package's own module body builds
+// `new NativeEventEmitter(NativeModules.VolumeManager)` around a proxy that throws
+// when unlinked — and that throw surfaces in dev as a red LogBox ERROR ("The
+// package 'react-native-volume-manager' doesn't seem to be linked"), even though
+// the rejection below is caught. So `NativeModules.VolumeManager` is asked FIRST:
+// in Expo Go the answer is "no", the package is never loaded, there is no red box
+// and no failed module left in Metro's registry, and the fallback is chosen one
+// step earlier.
+//
 // Writes are coalesced (`lib/player/swipeApply.ts`): a drag emits a value every
 // frame, and each of these is a native call.
 
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import { createLatestWriter, VOLUME_WRITE_MS } from './swipeApply';
 
 /**
@@ -48,6 +58,17 @@ interface VolumeApi {
   setVolume(value: number, config?: { showUI?: boolean; type?: 'music' }): Promise<void>;
   addVolumeListener?(listener: (result: { volume: number }) => void): { remove(): void };
 }
+
+/**
+ * Is the native module actually linked into this binary?
+ *
+ * Asked BEFORE the package is evaluated (see the header): an unlinked package
+ * throws from its own module body, and dev builds report that as a LogBox ERROR
+ * even when the import's rejection is caught. `VolumeManager` is the name both
+ * platforms register (`VolumeManagerModule.NAME` on Android,
+ * `RCT_EXPORT_MODULE(VolumeManager)` on iOS).
+ */
+const nativeLinked = Platform.OS !== 'web' && !!(NativeModules as { VolumeManager?: unknown })?.VolumeManager;
 
 let api: VolumeApi | null = null;
 let loading: Promise<VolumeApi | null> | null = null;
@@ -111,6 +132,9 @@ export function readVolume(): number {
  */
 export async function beginVolumeSession(): Promise<number> {
   if (Platform.OS === 'web') return current;
+  // Expo Go, or a build made before the package was installed: there is no
+  // device API to reach, so do not even load the module that would throw.
+  if (!nativeLinked) return current;
 
   if (!api) {
     loading ??= (async () => {

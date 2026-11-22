@@ -225,7 +225,7 @@ const SheetRow = memo(function SheetRow({
           style={[
             styles.itemLabel,
             row.selected && !navigates ? styles.itemLabelSelected : null,
-            row.disabled ? styles.disabled : null,
+            row.disabled || row.muted ? styles.disabled : null,
           ]}
           numberOfLines={1}
         >
@@ -233,7 +233,7 @@ const SheetRow = memo(function SheetRow({
         </Text>
         {row.hint ? (
           <Text
-            style={[styles.itemHint, row.disabled ? styles.disabled : null]}
+            style={[styles.itemHint, row.disabled || row.muted ? styles.disabled : null]}
             numberOfLines={1}
           >
             {row.hint}

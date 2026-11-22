@@ -1,10 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 2) silver fill fades in: 700 - 1300 ms -->
-<objectAnimator xmlns:android="http://schemas.android.com/apk/res/android"
-    android:propertyName="fillAlpha"
-    android:valueFrom="0"
-    android:valueTo="1"
-    android:valueType="floatType"
-    android:startOffset="700"
-    android:duration="600"
-    android:interpolator="@android:interpolator/fast_out_slow_in" />
+<!--
+    THE FILL: arrives under the outline, then BREATHES while the app is starting.
+
+    The intro half is 260 - 880 ms (the fill is already underway when the
+    outline finishes drawing, so the hand-over has no gap).
+
+    THE SECOND ANIMATOR IS THE ANSWER TO "THE ANIMATION ENDS, THEN THE SPLASH
+    SITS STILL FOR SECONDS". Android's own guidance for a startup longer than a
+    second is a looping animation (developer.android.com/develop/ui/views/
+    launch/splash-screen), and the splash window is shown until the app hides
+    it — so on a slow phone the one-shot intro used to freeze on its last frame
+    for as long as the JS bundle, fonts and cache restore took.
+
+    `repeatCount="-1"` + `repeatMode="reverse"` makes the fill breathe between
+    full silver and 78% for as long as the splash is up: continuous, unmistakably
+    "still working", and destroyed with the window the moment `hideAsync` runs.
+    It starts exactly where the intro ends, so there is no jump at the seam, and
+    it is opacity only — a breathing SCALE would grow the ink toward the mask
+    edge, which is the bug this release fixes.
+
+    This is the custom loading indicator, natively: no in-app splash, no second
+    hand-off, no extra JS frame.
+-->
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:ordering="together">
+
+    <!-- 1) silver fill fades in under the drawing outline: 260 - 880 ms -->
+    <objectAnimator
+        android:propertyName="fillAlpha"
+        android:valueFrom="0"
+        android:valueTo="1"
+        android:valueType="floatType"
+        android:startOffset="260"
+        android:duration="620"
+        android:interpolator="@android:interpolator/fast_out_slow_in" />
+
+    <!-- 2) idle pulse until the app is ready: starts where the intro ends, forever -->
+    <objectAnimator
+        android:propertyName="fillAlpha"
+        android:valueFrom="1"
+        android:valueTo="0.78"
+        android:valueType="floatType"
+        android:startOffset="880"
+        android:duration="1100"
+        android:repeatCount="-1"
+        android:repeatMode="reverse"
+        android:interpolator="@android:interpolator/accelerate_decelerate" />
+</set>

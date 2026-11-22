@@ -1,21 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- whole logo grows slightly while it appears: 0 - 1400 ms -->
+<!--
+    THE GROUP: a small settle during the intro, then the pulse that keeps the
+    splash alive while the app finishes starting.
+
+    THE SETTLE IS 0.94 -> 1 OVER 880ms, not 0.9 -> 1 over 1400ms. The old
+    duration was longer than Android's ~1s animation budget, so the icon was
+    frozen mid-zoom at whatever frame the system stopped on — the "it's zoomed
+    in" half of the report. 0.94 is also all the travel a splash logo needs;
+    the larger 0.9 start reads as a lurch on a icon this dense.
+
+    1.025 IS THE MOST THE PULSE MAY GROW. The artwork is fit to 0.68 of the
+    viewport so its furthest ink sits at 218 units against the mask's 233
+    (`ic_miori_logo.xml` documents the measurement). 218 x 1.025 = 223, still
+    inside the circle; anything past 1.07 starts shaving the M's tips again.
+-->
 <set xmlns:android="http://schemas.android.com/apk/res/android"
     android:ordering="together">
 
+    <!-- 1) the settle, inside the system's animation budget: 0 - 880 ms -->
     <objectAnimator
         android:propertyName="scaleX"
-        android:valueFrom="0.9"
+        android:valueFrom="0.94"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="1400"
+        android:duration="880"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
 
     <objectAnimator
         android:propertyName="scaleY"
-        android:valueFrom="0.9"
+        android:valueFrom="0.94"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="1400"
+        android:duration="880"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
+
+    <!-- 2) the breathing pulse, paired with the fill's: forever, from the intro's end -->
+    <objectAnimator
+        android:propertyName="scaleX"
+        android:valueFrom="1"
+        android:valueTo="1.025"
+        android:valueType="floatType"
+        android:startOffset="880"
+        android:duration="1100"
+        android:repeatCount="-1"
+        android:repeatMode="reverse"
+        android:interpolator="@android:interpolator/accelerate_decelerate" />
+
+    <objectAnimator
+        android:propertyName="scaleY"
+        android:valueFrom="1"
+        android:valueTo="1.025"
+        android:valueType="floatType"
+        android:startOffset="880"
+        android:duration="1100"
+        android:repeatCount="-1"
+        android:repeatMode="reverse"
+        android:interpolator="@android:interpolator/accelerate_decelerate" />
 </set>

@@ -484,6 +484,17 @@ interface SettingsSchema {
    */
   'player.defaultSource': string;
   /**
+   * INTERNAL — the one-shot marker for the 22 Nov default-source migration.
+   *
+   * NOT a preference and not shown anywhere. The previous build shipped a
+   * migration that rewrote an untouched `'auto'` into `'mega'`, so a stored
+   * `'mega'` may be either a real choice or that migration's leftover, and the
+   * two are indistinguishable. This marker makes the reversal run exactly once:
+   * without it, every launch would overwrite a viewer who later chose Mega by
+   * hand, which is worse than the thing being fixed.
+   */
+  'player.defaultSourceMigrated': boolean;
+  /**
    * The quality rung to lock at open, stored as the HLS variant label
    * ('1080p', '720p', …) exactly as `listVariants` names them. `'auto'` — the
    * default — is the ABR master playlist, unchanged. A stated rung is locked
@@ -630,7 +641,8 @@ export const DEFAULTS: SettingsSchema = {
   'player.autoSkipOutro': false,
   'player.cache': 'balanced',
   'player.swipeSides': 'brightness-left',
-  'player.defaultSource': 'mega',
+  'player.defaultSource': 'auto',
+  'player.defaultSourceMigrated': false,
   'player.defaultQuality': 'auto',
   'player.hiddenControls': '[]',
   'player.speed': 1,
@@ -756,6 +768,12 @@ export function isKnownValue(key: SettingKey, value: unknown): boolean {
   if (key === 'player.swipeSides') {
     return PLAYER_SWIPE_SIDES.some((s) => s.key === value);
   }
+  if (key === 'player.defaultSourceMigrated') {
+    // A boolean whose default is `false`: `allowedValues` would read that as
+    // "the only legal value is false" and reset a marker that had correctly
+    // been set, re-running the migration on every launch.
+    return typeof value === 'boolean';
+  }
   if (key === 'player.defaultSource' || key === 'player.defaultQuality') {
     // Free-form on purpose — the source is whatever extension id the picker
     // wrote (built-in or user-installed), the quality is whatever label a
@@ -875,9 +893,17 @@ export async function hydrateSettings(): Promise<void> {
   hydrated = true;
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    if (!raw) {
+      // A FRESH INSTALL HAS ALREADY MIGRATED. Marking it here means the first
+      // launch that DOES write a blob records the marker too — otherwise a
+      // viewer who chose Mega on day one would have that choice reversed on day
+      // two, when the migration ran against their first save.
+      cache = { ...DEFAULTS, 'player.defaultSourceMigrated': true };
+      return;
+    }
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const next: Cache = { ...DEFAULTS };
+    let dirty = false;
     // Copy only known keys with a known value. A stale or hand-edited value
     // must never be able to put a component into an impossible state.
     for (const key of Object.keys(DEFAULTS) as SettingKey[]) {
@@ -891,14 +917,24 @@ export async function hydrateSettings(): Promise<void> {
     if (typeof oldUrl === 'string' && oldUrl.trim() && Array.isArray(next['extensions.repoUrls']) && next['extensions.repoUrls'].length === 0) {
       (next as unknown as Record<string, unknown>)['extensions.repoUrls'] = [oldUrl.trim()];
     }
-    // Migration: the old default source was 'auto'; the new default is MegaPlay.
-    // Only the untouched default is migrated — a viewer who picked a specific
-    // source keeps their choice.
-    if (next['player.defaultSource'] === 'auto') {
-      (next as unknown as Record<string, unknown>)['player.defaultSource'] = 'mega';
+    // Migration (22 Nov): `auto` is the default again, and ONCE per install a
+    // stored Mega is moved back to it. Mega is where the previous build's
+    // migration parked every untouched install, so leaving it would mean the
+    // "default is auto" change never reaches the people it is for. A viewer who
+    // genuinely picks Mega after this is never overridden again — the marker is
+    // persisted with the rest of the blob.
+    if (!next['player.defaultSourceMigrated']) {
+      if (next['player.defaultSource'] === 'mega') next['player.defaultSource'] = 'auto';
+      next['player.defaultSourceMigrated'] = true;
+      dirty = true;
     }
     cache = next;
     emit();
+    // Persist the marker immediately. `setSetting` is the only other writer, so
+    // without this a viewer who never changes a setting would re-run the
+    // migration on every launch — harmless today, wrong the day they choose
+    // Mega.
+    if (dirty) void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(cache)).catch(() => {});
   } catch {
     /* unreadable or corrupt — defaults stand, which is always a valid UI */
   }

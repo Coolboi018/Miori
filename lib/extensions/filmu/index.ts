@@ -39,6 +39,9 @@
 // state") is readable now — everything IS on the same page:
 //
 //   GET https://bingr.one/api/sources?kind=anime&anilist={id}&e={ep}&audio=sub&t={session}
+//     (v3.3, 23 Nov: EVERY server in the matrix is offered — sub rows first,
+//      then the dub rows labelled as such. Dropping dubs left a title with one
+//      row when the sub servers were down.)
 //     → 200 body `v1.<base64url(nonce12 + XORred JSON)>` — the client decodes
 //     `v1.` payloads with a FNV-flavoured keystream cipher whose SECRET
 //     (`vY7#qL2!mZ9@wK4$`) ships in the bundle (module 74763). Decoded state:
@@ -520,21 +523,37 @@ export function createFilmuExtension(): Extension {
         // server it is not would be worse than the generic name.
         const aligned = st.servers?.length === st.streams.length;
         const seenUrl = new Set<string>();
-        const candidates: { url: string; subs: SubtitleTrack[]; label: string }[] = [];
+        const candidates: {
+          url: string;
+          subs: SubtitleTrack[];
+          label: string;
+          dub: boolean;
+        }[] = [];
         st.streams.forEach((s, i) => {
           if (!s?.url || !STREAM_URL.test(s.url) || seenUrl.has(s.url)) return;
           const serverId = aligned ? (st.servers?.[i]?.id ?? '') : '';
-          // SUB AUDIO ONLY. The request already says `audio=sub`; a dub server
-          // appearing in the matrix would play the wrong voice track under
-          // subtitle lines, so it is dropped rather than offered.
-          if (/dub/i.test(serverId)) return;
           seenUrl.add(s.url);
           candidates.push({
             url: s.url,
             subs: toSubTracks(s),
             label: serverLabel(serverId) ?? s.label ?? 'Katana',
+            /**
+             * 🔴 DUB ROWS ARE KEPT, AND LAST (23 Nov).
+             *
+             * They used to be dropped on the theory that `audio=sub` should
+             * never play a dub voice under subtitle lines. The theory cost the
+             * viewer rows: a matrix whose sub servers are all down (or whose
+             * sub streams arrive silent) collapsed to ONE row, while the dub
+             * servers — same stream, English audio — were thrown away before
+             * the probe ever ran. The row now says which voice it carries
+             * ("Katana Dub"), the sub rows still come first, and picking is the
+             * viewer's call, exactly as their own player presents it.
+             */
+            dub: /dub/i.test(serverId),
           });
         });
+        // Stable in modern V8: subs keep their server order, dubs follow.
+        candidates.sort((a, b) => Number(a.dub) - Number(b.dub));
         // Probe together: N servers must cost one round-trip, not N.
         const alive = await Promise.all(
           candidates.map((c) =>
@@ -563,7 +582,7 @@ export function createFilmuExtension(): Extension {
   return {
     id: 'filmu',
     label: 'Bingr (Anime)',
-    version: '3.2.0',
+    version: '3.3.0',
     contractVersion: 1,
     capabilities: { subtitles: true, skipMarkers: true, thumbnails: true },
 

@@ -14,8 +14,8 @@
 // been delivered.
 //
 // `progress.md` claimed a "30s stall watchdog" was done. It was `STALL_MS` in
-// `components/player/legacy/VerticalPlayerScreen.tsx` — the screen that was
-// PARKED when the landscape player replaced it — and it was not carried over.
+// the old vertical player (since deleted) — the screen that was PARKED when the
+// landscape player replaced it — and it was not carried over.
 // A confident note that outlives the line of code it describes is the single
 // most expensive kind of wrong documentation in this project.
 //
@@ -474,6 +474,25 @@ console.log('\n5. the stall watchdog\n');
       { dt: 1000, position: 201, ahead: 20 },
     ]).kinds[2] === 'ok'
   );
+
+  // THE MISSING RING (23 Nov report: "the episode pauses … no spinner on
+  // screen"). A playhead frozen while the buffer is EMPTY used to fall through
+  // the starve rule, which returned before the rebuffer rule ever ran — so the
+  // one state a viewer reads as "loading" produced no ring for fifteen seconds.
+  const thinFrozen = run(
+    DEFAULT,
+    Array.from({ length: 3 }, () => ({ dt: 1000, position: 200, ahead: 0.4 }))
+  );
+  check(
+    'a frozen playhead with a nearly empty buffer reads `rebuffering` (the ring), not `starving`',
+    thinFrozen.kinds.slice(1).every((k) => k === 'rebuffering'),
+    `got ${thinFrozen.kinds.join(' → ')}`
+  );
+  check(
+    '…while the SAME thin buffer with a moving picture is still only `starving`',
+    run(DEFAULT, Array.from({ length: 3 }, (_, i) => ({ dt: 1000, position: 200 + i, ahead: 0.4 }))).kinds.includes('starving'),
+    'a slow connection that is playing fine must never show a ring'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +766,12 @@ const chrome = readFileSync(`${ROOT}/components/player/fullscreen/Chrome.tsx`, '
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^[ \t]*\/\/.*$/gm, '');
 
+// The failure surfaces moved into their own module on 23 Nov. Their rules are
+// still rules, so they are read from where they actually live now.
+const cards = readFileSync(`${ROOT}/components/player/fullscreen/PlayerCards.tsx`, 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^[ \t]*\/\/.*$/gm, '');
+
 check(
   'the health tick is gated on a rendered frame',
   /if \(!firstFrameRef\.current\) return;/.test(screen),
@@ -769,8 +794,9 @@ check(
   '`timeUpdate` stops exactly when the player stalls — a monitor driven by the event it detects never runs during the condition it was written for'
 );
 check(
-  'a stall spends the retry budget through `failover`, not by reaching around it',
-  /health\.kind === 'stalled'\)[\s\S]{0,600}?failoverRef\.current\(\)/.test(screen)
+  'a stall goes through the recovery ladder, not straight to another source',
+  /health\.kind === 'stalled'\)[\s\S]{0,700}?recoverStreamRef\.current\(/.test(screen),
+  'hopping on the first stall throws away every buffered byte — the one thing a starved stream cannot afford'
 );
 check(
   'the player is PAUSED when the error card is up',
@@ -785,12 +811,14 @@ check(
 );
 check(
   'the error card offers a way OUT, not only a way to retry',
-  /onPress=\{onBack\}/.test(screen) && /errorBtnGhost/.test(screen),
+  /onPress=\{onBack\}/.test(cards) &&
+    /errorBtnGhost/.test(cards) &&
+    /<PlaybackErrorCard[\s\S]{0,400}?onBack=\{onBack\}/.test(screen),
   'on iOS there is no hardware back button and this route has no header'
 );
 check(
   'a malformed route is refused before it writes anything',
-  /const linkOk =[\s\S]{0,200}Number\.isInteger/.test(screen) &&
+  /const linkOk = isPlayableRoute\(animeId, epNum\)/.test(screen) &&
     /if \(!linkOk\) return;\n\s*void savePosition/.test(screen.replace(/\r/g, '')),
   'a NaN episode writes `miori:pos:NaN:NaN` to disk and nothing ever cleans it up'
 );

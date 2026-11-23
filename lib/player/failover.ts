@@ -32,6 +32,57 @@ export const MAX_FAILOVER_ROUNDS = 3;
 /** Total wall-clock patience for a failing stretch, regardless of walks. */
 export const MAX_FAILOVER_WALL_MS = 90_000;
 
+/**
+ * The failover budget, as ONE value.
+ *
+ * It used to be two loose numbers in the screen (`roundsRef`, `failClockRef`),
+ * reset by hand at six call sites — and that is exactly how it broke. `load()`
+ * reset both at its top, and `wrapLoad()` is a `load()`, so the walk's own
+ * re-resolve wiped the budget that was supposed to stop the walk: rounds back to
+ * 0, wall clock back to 0, `wrapVerdict` unable to ever return `'giveup'`. A
+ * stalled episode then resolved and re-walked the whole source list forever —
+ * the device report "the app got stuck and closed itself" (23 Nov).
+ *
+ * One object with one reset rule means a caller cannot reset half of it.
+ */
+export interface FailBudget {
+  /** Walks already spent. Incremented at a WRAP, never per hop. */
+  rounds: number;
+  /** When the failing stretch began, ms. 0 = not running. */
+  sinceMs: number;
+}
+
+/** A budget that has spent nothing and is not running yet. */
+export function freshBudget(): FailBudget {
+  return { rounds: 0, sinceMs: 0 };
+}
+
+/**
+ * What a `load()` does to the budget.
+ *
+ * `keep = true` is for the WRAP-LOAD — the load a `wrapLoad()` starts to mint
+ * fresh URLs for a list that has just failed. That load belongs to the stretch
+ * that is already failing, so it must inherit the budget. Every other load
+ * (mount, Retry, Change source, a viewer's Refresh) is a fresh decision and
+ * starts a fresh stretch.
+ *
+ * This is the whole fix for the endless loop: the walk can now actually reach
+ * `MAX_FAILOVER_ROUNDS` and say so.
+ */
+export function budgetOnLoad(prev: FailBudget, keep: boolean): FailBudget {
+  return keep ? prev : freshBudget();
+}
+
+/** Start the wall clock on the first failure of a stretch, and never restart it there. */
+export function noteFailure(prev: FailBudget, now: number): FailBudget {
+  return prev.sinceMs === 0 ? { ...prev, sinceMs: now } : prev;
+}
+
+/** One full walk has been spent. */
+export function spendRound(prev: FailBudget): FailBudget {
+  return { ...prev, rounds: prev.rounds + 1 };
+}
+
 export type WrapAction = 'reload' | 'giveup';
 
 /**

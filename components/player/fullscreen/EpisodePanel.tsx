@@ -23,6 +23,7 @@ import {
 import { Image } from 'expo-image';
 
 import { AppIcon } from '@/components/ui/AppIcon';
+import { ActivityRing } from './Chrome';
 import type { EdgeInsets } from 'react-native-safe-area-context';
 import { font, radii } from '@/lib/ui/tokens';
 import { formatEpisodeNumber } from '@/lib/player/format';
@@ -52,6 +53,7 @@ export const EpisodePanel = memo(function EpisodePanel({
   onClose,
   insets,
   onVisibleNumbers,
+  loading,
 }: {
   visible: boolean;
   episodes: PanelEpisode[];
@@ -62,6 +64,14 @@ export const EpisodePanel = memo(function EpisodePanel({
   insets: EdgeInsets;
   /** Reported viewable episode numbers — drives the Kitsu fill-in. */
   onVisibleNumbers?: (numbers: number[]) => void;
+  /**
+   * True while the episode list is still being read.
+   *
+   * The panel used to draw an empty list for that window, which is
+   * indistinguishable from "this title has no episodes" — the one reading a
+   * viewer must not be given while a resolve is in flight.
+   */
+  loading?: boolean;
 }) {
   const anim = useRef(new Animated.Value(0)).current;
   /**
@@ -177,6 +187,23 @@ export const EpisodePanel = memo(function EpisodePanel({
             <AppIcon name="close" size={20} color="#fff" strokeWidth={2} />
           </Pressable>
         </View>
+        {episodes.length === 0 ? (
+          <View style={styles.empty}>
+            {loading ? (
+              <ActivityRing />
+            ) : (
+              <AppIcon name="alert" size={22} color="rgba(255,255,255,0.35)" strokeWidth={2} />
+            )}
+            <Text style={styles.emptyTitle}>
+              {loading ? 'Loading episodes…' : 'No episodes yet'}
+            </Text>
+            <Text style={styles.emptyBody}>
+              {loading
+                ? 'Reading the episode list for this title.'
+                : 'This title has no episode list to show.'}
+            </Text>
+          </View>
+        ) : (
         <FlatList
           ref={listRef}
           data={episodes}
@@ -216,6 +243,7 @@ export const EpisodePanel = memo(function EpisodePanel({
             />
           )}
         />
+        )}
       </Animated.View>
     </View>
   );
@@ -414,5 +442,25 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: '#fff',
+  },
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 24,
+    paddingBottom: 40,
+  },
+  emptyTitle: {
+    color: 'rgba(255,255,255,0.9)',
+    fontFamily: font.semibold,
+    fontSize: 14,
+  },
+  emptyBody: {
+    color: 'rgba(255,255,255,0.45)',
+    fontFamily: font.regular,
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: 'center',
   },
 });

@@ -94,23 +94,32 @@ export interface PlayerTuning {
  * Buffer profiles, in seconds / bytes. Tuned for a low-RAM phone first:
  * 'low' holds ~15s ahead and caps the byte pool so a 1080p stream cannot eat
  * the device's memory; 'high' trades memory for stutter slack on weak links.
+ *
+ * `minBufferForPlayback` is the RESUME threshold, not the start-up one: it is
+ * how much media a stalled or paused player must have before it starts again.
+ * At the SDK default (2s) a thin connection restarts on two seconds of buffer,
+ * plays them, and stalls again — a stutter loop that looks like a broken
+ * player. Real players hold back a few seconds so each restart is worth it, so
+ * the floor now follows the profile: 3s / 4s / 5s. The cost of a larger floor
+ * is a slightly longer wait before playback RESUMES after a stall; the cost of
+ * a small one is a stream that never stops stuttering.
  */
 const BUFFER_PROFILES: Record<PlayerBufferKey, BufferOptions> = {
   low: {
     preferredForwardBufferDuration: 15,
-    minBufferForPlayback: 1.5,
+    minBufferForPlayback: 3,
     maxBufferBytes: 24 * 1024 * 1024,
     prioritizeTimeOverSizeThreshold: false,
   },
   balanced: {
     preferredForwardBufferDuration: 30,
-    minBufferForPlayback: 2,
+    minBufferForPlayback: 4,
     maxBufferBytes: 48 * 1024 * 1024,
     prioritizeTimeOverSizeThreshold: true,
   },
   high: {
     preferredForwardBufferDuration: 60,
-    minBufferForPlayback: 2.5,
+    minBufferForPlayback: 5,
     // 0 = the pipeline decides; on a flaky CDN more slack beats a hard cap.
     maxBufferBytes: 0,
     prioritizeTimeOverSizeThreshold: true,

@@ -221,3 +221,19 @@ export function episodesToShow(
   }
   return dedupeByNumber(rows);
 }
+
+/**
+ * The title `episodesToShow` pads a released-but-unlisted episode with.
+ *
+ * It exists so a released episode still has a row and something to say, but it
+ * is a PLACEHOLDER, not a name — and a truthy one, which is why it used to block
+ * the real name in `mergeKitsuMeta` (`e.title || m.title` kept "Episode 7"
+ * forever). Anything that decides "is there a name to show here" has to go
+ * through this, or it will print the padding as if it were a title.
+ */
+export function isPlaceholderEpisodeTitle(
+  title: string | null | undefined,
+  number: number
+): boolean {
+  return !title || title.trim().toLowerCase() === `episode ${number}`;
+}

@@ -5,9 +5,9 @@
 // WHY THIS FILE EXISTS
 //
 // `progress.md` claims the player has a "30s stall watchdog". It does not. The
-// one that exists is `STALL_MS` in `components/player/legacy/VerticalPlayerScreen.tsx`
-// — the screen that was PARKED when the landscape player replaced it, and the
-// watchdog was not carried over. What shipped is a FIRST-FRAME watchdog: it is
+// one that existed was `STALL_MS` in the old vertical player (deleted in the
+// 23 Nov dead-code pass — see git history), which was PARKED when the landscape
+// player replaced it, and the watchdog was not carried over. What shipped is a FIRST-FRAME watchdog: it is
 // armed by `replaceAsync` and cancelled by the first rendered frame, so it can
 // only ever answer "this source never started".
 //
@@ -416,17 +416,43 @@ export function observeHealth(
     };
   }
 
+  // The starve bookkeeping runs BEFORE the spinner rule, because the spinner
+  // rule now depends on it — but nothing acts on `starving` yet.
+  const starving = ahead < profile.starveFloor;
+  const starvingSince = starving ? prev.starvingSince ?? s.at : null;
+  const starveMs = starvingSince != null ? s.at - starvingSince : 0;
+
+  // ── Rule 3b: FROZEN + THIN IS A REBUFFER, NOT MERELY STARVING. ──────────
+  //
+  // THE MISSING SPINNER (23 Nov report: "the episode pauses … there was no
+  // spinner on screen"). This rule used to sit AFTER the starve return, so a
+  // stream that had run out of buffer — the one state a viewer reads as
+  // "loading" — answered `starving` and produced no ring at all. Fifteen
+  // seconds of frozen picture with no feedback, then a silent source hop.
+  //
+  // The distinction is the playhead, and it is the same evidence every other
+  // rule here rests on: a thin buffer with a MOVING picture is a slow
+  // connection playing fine (no ring, `starving`), a thin buffer with a FROZEN
+  // picture is a rebuffer (ring). It cannot fire on a moving frame.
+  //
+  // `status` is still deliberately NOT part of this test. The SDK has no
+  // 'buffering' status — a mid-playback rebuffer reports 'loading', the same
+  // value as the initial load, and every `currentTime` write into unbuffered
+  // territory produces one. Keying the spinner off `status` blinks it on and
+  // off under the viewer's thumb during a double-tap seek sequence.
+  if (frozenMs >= REBUFFER_HINT_MS) {
+    return { state: { ...base, starvingSince }, health: { kind: 'rebuffering', ahead, frozenMs } };
+  }
+
   // ── Rule 4: a thin buffer is reported, never acted on. ──────────────────
   //
   // `starving` is a word for the UI and for a future hint. It is deliberately
   // NOT a reason to change quality, restart the source, or show a spinner: a
   // thin buffer is still a moving picture, and the old auto-downgrade turned
   // this one condition into repeated reloads on exactly the connection least
-  // able to afford them.
-  const starving = ahead < profile.starveFloor;
-  const starvingSince = starving ? prev.starvingSince ?? s.at : null;
-  const starveMs = starvingSince != null ? s.at - starvingSince : 0;
-
+  // able to afford them. (The bitrate step that DOES exist lives in
+  // `lib/player/recovery.ts`, is driven by a stall rather than by a thin
+  // buffer, and is bounded.)
   if (starving) {
     return {
       state: { ...base, starvingSince },
@@ -434,19 +460,7 @@ export function observeHealth(
     };
   }
 
-  // Not starving and not stalled. The only remaining question is whether the
-  // playhead is currently stopped, which is what earns a spinner.
-  //
-  // `status` is deliberately NOT part of this test. The SDK has no 'buffering'
-  // status — a mid-playback rebuffer reports 'loading', the same value as the
-  // initial load, and every `currentTime` write into unbuffered territory
-  // produces one. Keying the spinner off `status` therefore blinks it on and
-  // off under the viewer's thumb during a double-tap seek sequence. The frozen
-  // playhead is the actual evidence, and it cannot flicker.
-  if (frozenMs >= REBUFFER_HINT_MS) {
-    return { state: { ...base, starvingSince }, health: { kind: 'rebuffering', ahead, frozenMs } };
-  }
-
+  // Not starving and not stalled: the picture is moving with media ahead.
   return { state: { ...base, starvingSince }, health: { kind: 'ok', ahead } };
 }
 

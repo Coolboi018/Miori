@@ -49,6 +49,7 @@
 // thing that makes paging work in descending order at all.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { isPlaceholderEpisodeTitle } from '@/lib/anilist/episodes';
 import type { EpisodeInfo } from '@/lib/extensions/types';
 
 const KITSU = 'https://kitsu.io/api/edge';
@@ -534,9 +535,14 @@ export function mergeKitsuMeta(
       out.push(e);
       continue;
     }
+    // A padding title is not a name and must not outrank Kitsu's. It is truthy,
+    // so the old `e.title || m.title` won with "Episode 7" every time the source
+    // had not listed the episode — which is precisely the auto-advance case the
+    // first-load stage cares about. A REAL source title still wins.
+    const own = isPlaceholderEpisodeTitle(e.title, e.number) ? '' : e.title;
     out.push({
       number: e.number,
-      title: e.title || m.title,
+      title: own || m.title || e.title,
       poster: e.poster ?? m.poster ?? null,
       synopsis: e.synopsis ?? m.synopsis ?? null,
       duration: e.duration ?? (m.length ? m.length * 60 : null),

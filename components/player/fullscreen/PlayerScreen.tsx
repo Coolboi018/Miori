@@ -1,7 +1,7 @@
 // The landscape fullscreen player.
 //
-// This is the whole screen. It replaces the vertical watch page, which is parked
-// at `components/player/legacy/VerticalPlayerScreen.tsx`.
+// This is the whole screen. It replaced the vertical watch page, which was
+// deleted in the 23 Nov dead-code pass — one player, not two.
 //
 // WHAT WAS CARRIED OVER FROM THE VERTICAL PAGE, AND WHY IT IS GOOD: source
 // resolution with ordered failover, the cross-source HLS quality gather, resume
@@ -48,7 +48,7 @@ import {
   isPictureInPictureSupported,
   useVideoPlayer,
   VideoView,
-  type ContentType,
+  type VideoPlayer,
   type VideoSource,
 } from 'expo-video';
 import { StatusBar } from 'expo-status-bar';
@@ -64,6 +64,7 @@ import {
 } from './Chrome';
 import { EpisodePanel, type PanelEpisode } from './EpisodePanel';
 import { NextEpisodeCard } from './NextEpisodeCard';
+import { LoadingStage } from './LoadingStage';
 import { GestureSurface } from './GestureSurface';
 import {
   clampUnit,
@@ -92,6 +93,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { type MenuRow } from './Menu';
 import {
   PIP_HANDOFF_GRACE_MS,
+  PIP_SUBS_SETTLE_MS,
   playbackStage,
   shouldAutoEnterPip,
   shouldHoldPlayback,
@@ -134,10 +136,11 @@ import { clearPosition, loadPosition, loadPositions, savePosition, isSynced, mar
 import { createRegistry, resolveEpisode } from '@/lib/extensions/registry';
 import { fetchText } from '@/lib/extensions/fetch';
 import { listVariants, type HlsVariant } from '@/lib/extensions/hls';
-import type { Container, EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
+import { capFor } from '@/lib/player/rung';
+import type { EpisodeInfo, SubtitleTrack, WatchSource } from '@/lib/extensions/types';
 import { releasePresence, updatePresence, type PresenceMedia } from '@/lib/presence/discord';
 import { fetchMedia, mediaTitle, type MediaDetail } from '@/lib/anilist';
-import { episodesToShow, nextPlayableEpisode } from '@/lib/anilist/episodes';
+import { episodesToShow, isPlaceholderEpisodeTitle, nextPlayableEpisode } from '@/lib/anilist/episodes';
 import {
   kitsuEpisodeVersion,
   mergeKitsuMeta,
@@ -166,7 +169,24 @@ import { font, motion, radii } from '@/lib/ui/tokens';
 import { resolveInTwoWindows } from '@/lib/player/resolveWindow';
 // The constants are referenced in comments below; the decision functions
 // default to them inside the modules, so the component imports only the verbs.
-import { healOnFrame, wrapVerdict } from '@/lib/player/failover';
+import {
+  budgetOnLoad,
+  freshBudget,
+  healOnFrame,
+  noteFailure,
+  spendRound,
+  wrapVerdict,
+  type FailBudget,
+} from '@/lib/player/failover';
+import {
+  decideRecovery,
+  initialRecovery,
+  noteRecovered,
+  RECOVERY_EXHAUSTED_MESSAGE,
+  type RecoveryState,
+} from '@/lib/player/recovery';
+import { contentTypeFor, isPlayableRoute, labelDisagrees, paramNumber } from '@/lib/player/source';
+import { InvalidLinkCard, PlaybackErrorCard } from './PlayerCards';
 import { nextWalkIndex, pickStartIndex, readSourcePref, saveSourcePref } from '@/lib/player/sourcePref';
 import {
   clearSourceTrip,
@@ -201,6 +221,24 @@ const SAVE_EVERY = 10;
  * bounced off of.
  */
 const SYNC_AT = 0.82;
+
+/**
+ * 🎧 HOW LONG A MOVING PICTURE MAY STAY SILENT.
+ *
+ * An HLS master with a separate audio rendition, played as a bare variant URL,
+ * renders video forever and never makes a sound — and no error is raised, so
+ * every existing guard (watchdog, health, budgets) calls it healthy. A frame is
+ * proof of a picture, never of an audio track, so the two are checked apart.
+ *
+ * Two windows, 3s then 5s: some decoders enumerate tracks a beat after the
+ * first frame, and walking away from a good source over a slow enumeration
+ * would be worse than the bug. Eight seconds of confirmed silence is not a
+ * timing accident.
+ */
+const NO_AUDIO_GRACE_MS = 3000;
+const NO_AUDIO_RECHECK_MS = 5000;
+const NO_AUDIO_MESSAGE =
+  'This server is sending video with no audio track. Trying another source…';
 /** Below this a source's runtime is too short to judge "finished" by. */
 const SHORT_EPISODE = 300;
 const MARK_FINISHED = 0.9;
@@ -308,79 +346,12 @@ const BOTTOM_BAR_H = CHROME_BOTTOM_BAR_H;
  */
 const UNKNOWN_HEALTH = { kind: 'unknown' } as const;
 
-/**
- * `WatchSource.container` → expo-video's `ContentType`.
- *
- * ⚠️ WHY `'auto'` (URI sniffing) is NOT the default, and the one device report
- * that settled it. `'auto'` makes media3 INFER the source type from the URI's
- * file extension alone (`node_modules/expo-video/.../ContentType.kt`: AUTO
- * writes NO mimeType on the MediaItem). A URL with no extension at all — the
- * Bingr/Katana signed token `https://hikari.streamrip.fun/p/<opaque>` —
- * infers "other", which is the PROGRESSIVE extractor stack, and that stack
- * sniffs a `#EXTM3U` text playlist byte-for-byte: `NoDeclaredBrand`,
- * "None of the available extractors could read the stream", failover to Mega.
- * Every pick of Katana silently landed on Mega because of THIS, not signed-URL
- * expiry (30 Oct's first diagnosis — a `refresh()` could never fix it; every
- * fresh token fails identically, and the log said so).
- *
- * But OUR older lesson still stands: an extension that DERIVES `container`
- * from the URL string can mislabel, and an explicit type on a mislabelled
- * source is handed to the extractor unverified. So the rule is: trust the
- * label where the URL is SILENT (that is the only information there is, and
- * HLS-token sources of the Katana class assert it — `lib/extensions/filmu`
- * fails closed if the fetched master is not `#EXTM3U`); fall back to `'auto'`
- * sniffing when the label and the URL CONTRADICT each other (the mp4-
- * disguised-as-“playlist” case that produced the 7 Oct black video).
- */
-const CONTAINER_TO_CONTENT_TYPE: Record<Container, ContentType> = {
-  hls: 'hls',
-  mp4: 'progressive',
-};
-/** The URL itself carries the extension the label claims — label is redundant but right. */
-function labelAgrees(s: WatchSource): boolean {
-  const u = s.url.toLowerCase();
-  if (s.container === 'hls') return !u.includes('.mp4');
-  // `'mp4'`: media3's progressive stack sniffs the container itself
-  // (NoDeclaredBrand is fine to incur here — it is what the extractors
-  // answer for a master we did label right), so we only refuse the case
-  // where the URL positively NAMES an m3u8.
-  return !u.includes('.m3u8');
-}
-/**
- * The contentType a source is loaded with. See `labelAgrees` above.
- * `'auto'` for an unlabelled source is unchanged: extension-based sniffing
- * on a URL that carries `.m3u8`/`.mp4` reaches the same pipeline the label
- * would have chosen, at no cost.
- */
-function contentTypeFor(s: WatchSource): ContentType {
-  const declared = CONTAINER_TO_CONTENT_TYPE[s.container];
-  if (declared == null || !labelAgrees(s)) return 'auto';
-  return declared;
-}
-/** True when the sniffed pipeline would disagree with the label. Log-only aid. */
-function labelDisagrees(s: WatchSource): boolean {
-  const declared = CONTAINER_TO_CONTENT_TYPE[s.container];
-  return declared != null && !labelAgrees(s);
-}
-
-/**
- * Read a route param as a number, or `NaN`.
- *
- * `useLocalSearchParams<T>()` is a TYPE ASSERTION, not a parser. At runtime the
- * value is `string | string[]` for both params, and the array form is what a
- * duplicated query key produces — `Number(['1','2'])` is `NaN` because the
- * array stringifies to `"1,2"`. The generic silences that, which is how a
- * malformed deep link (`miori://watch/20920/abc`, reachable because `scheme:
- * "miori"` is in `app.json`) turns into `NaN` deep inside a screen that then
- * writes `miori:pos:NaN:NaN` and `miori:synced:NaN:NaN` to the user's disk on
- * every unmount. Junk keys are permanent and the symptom is an AniList
- * complaint rather than "bad link".
- */
-function paramNumber(raw: string | string[] | undefined): number {
-  const one = Array.isArray(raw) ? raw[0] : raw;
-  const n = Number(one);
-  return Number.isFinite(n) ? n : NaN;
-}
+// THE SOURCE-KIND AND ROUTE RULES now live in `lib/player/source.ts`.
+//
+// `contentTypeFor` / `labelAgrees` / `labelDisagrees` and `paramNumber` /
+// `isPlayableRoute` were inline here: two decisions with a device bug behind
+// each, reachable only by running this entire screen. They are pure, so they
+// moved where a check script can drive them. Nothing about them changed.
 
 export default function LandscapePlayer() {
   const params = useLocalSearchParams<{ id: string | string[]; ep: string | string[] }>();
@@ -395,8 +366,7 @@ export default function LandscapePlayer() {
    * a request. A screen that merely refused to render would still have already
    * written `NaN` keys on the way out.
    */
-  const linkOk =
-    Number.isInteger(animeId) && animeId > 0 && Number.isInteger(epNum) && epNum >= 1;
+  const linkOk = isPlayableRoute(animeId, epNum);
 
   /**
    * Connectivity, the same store the transport and React Query read.
@@ -477,7 +447,6 @@ export default function LandscapePlayer() {
 
   // --- Metadata -----------------------------------------------------------
   const [title, setTitle] = useState('');
-  const [episodeTitle, setEpisodeTitle] = useState<string | null>(null);
   // Episodes for the side panel. The SOURCE list (what actually exists and is
   // playable) lives in `sourceEpisodes`; Kitsu only DECORATES it, and the merge
   // is re-derived whenever a Kitsu page lands (kitsuVersion) so a late artwork
@@ -540,6 +509,44 @@ export default function LandscapePlayer() {
     anilistOwnsProgress,
     anilistProgress,
   ]);
+
+  /**
+   * The name of the episode that is coming, from whatever is already known.
+   *
+   * This used to be STATE, committed only after the SOURCE's episode list
+   * returned — the very fetch the scrape is waiting on — so the first-load stage
+   * said "Episode 2" and no name for its entire life, then the name appeared
+   * once the stage was gone. The panel's list is the right source: source rows
+   * decorated by Kitsu, and Kitsu is the side that actually carries episode
+   * names. Deriving it means the name paints as soon as either side has it,
+   * which on the usual details → play route is at mount (the cache is warm).
+   * `isPlaceholderEpisodeTitle` keeps the padding `episodesToShow` inserts from
+   * being rendered as if it were a name.
+   */
+  const episodeTitle = useMemo(() => {
+    const found = episodes.find((e) => e.number === epNum)?.title;
+    return isPlaceholderEpisodeTitle(found, epNum) ? null : found;
+  }, [episodes, epNum]);
+
+  /**
+   * Ask Kitsu for THIS episode's page at load time.
+   *
+   * The panel only resolves Kitsu pages from its own visible rows, so an
+   * auto-advance into an episode the viewer has not scrolled to had no name to
+   * show while the source was being scraped. Kitsu is the cheap side of this
+   * screen (one page, cached per title), and it does not depend on the video
+   * scrape at all, so it is asked in parallel and the name fills in mid-load.
+   */
+  useEffect(() => {
+    if (!animeId || !epNum) return;
+    let cancelled = false;
+    void resolveKitsuEpisodes(animeId, [epNum]).then(() => {
+      if (!cancelled) setKitsuVersion(kitsuEpisodeVersion(animeId));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [animeId, epNum]);
 
   // Kitsu fill-in for the panel. Viewability comes from the EpisodePanel's
   // FlatList (no pager here — the panel is a scrollable list), debounced so a
@@ -658,6 +665,13 @@ export default function LandscapePlayer() {
    * downgrade path steps down from THIS rather than from the top of the ladder.
    */
   const [liveHeight, setLiveHeight] = useState<number | null>(null);
+  /**
+   * The same observation, for code that runs from TIMERS rather than renders.
+   * The recovery ladder needs to know which rung is playing to know which one
+   * is below it, and it runs from the 1s health tick.
+   */
+  const liveHeightRef = useRef<number | null>(null);
+  liveHeightRef.current = liveHeight;
 
   // --- Subtitles ----------------------------------------------------------
   const [tracks, setTracks] = useState<SubtitleTrack[]>([]);
@@ -747,6 +761,30 @@ export default function LandscapePlayer() {
    */
   const [pipSupported] = useState(isPictureInPictureSupported);
   /**
+   * WHETHER THE SYSTEM OWNS THE PICTURE RIGHT NOW, as RENDER state.
+   *
+   * `pipActiveRef` is the same fact held for the transport policy, and a ref
+   * cannot gate a render. This gates the GESTURE SURFACE, so a tap aimed at a
+   * tiny window cannot raise a full-size chrome.
+   *
+   * ⚠️ THERE IS NO PiP BUTTON, AND THERE CANNOT BE ONE FROM HERE.
+   *
+   * `expo-video`'s `layoutForPiPEnter` (android/…/PictureInPictureManager.kt)
+   * REMOVES the player view from its parent, sets every other child of the
+   * activity's content view to `View.GONE` — that is the entire React Native
+   * root, chrome and subtitles included — and re-adds the player view
+   * full-screen. So nothing this app draws is in the PiP window at all; the
+   * play/pause disc that used to be mounted here (`PipControls`, 23 Nov) rendered
+   * into a GONE subtree and could never have been seen. A control in that window
+   * has to come from the platform: a MediaSession action list, which expo-video
+   * does not expose and which needs `supportsBackgroundPlayback` — a policy this
+   * app refuses on purpose, because a locked phone must be silent.
+   *
+   * The PiP window's own expand/close overlay is the system's, and a headset's
+   * media button still reaches the player through the session it already keeps.
+   */
+  const [pipOn, setPipOn] = useState(false);
+  /**
    * IS THE VIDEO IN A SYSTEM PIP WINDOW?
    *
    * Needed because `AppState` cannot tell PiP from a locked phone: Android
@@ -756,6 +794,11 @@ export default function LandscapePlayer() {
    * listeners that must not be rebuilt when PiP toggles.
    */
   const pipActiveRef = useRef(false);
+  /**
+   * Timestamp until which subtitle publishing is parked after a PiP exit — 0
+   * means "not parked". See `PIP_SUBS_SETTLE_MS`.
+   */
+  const subsHoldUntilRef = useRef(0);
   /** Pending "did a PiP handoff start?" timer. See `PIP_HANDOFF_GRACE_MS`. */
   const pipHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
@@ -781,19 +824,45 @@ export default function LandscapePlayer() {
   const videoViewRef = useRef<VideoView>(null);
   /** Pending "this source never rendered" timer. */
   const frameWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The pending silent-picture check; cleared by every new media item. */
+  const audioGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** False once this screen has begun unmounting; long timers check it. */
+  const mountedRef = useRef(true);
   /**
-   * Consecutive failure ROUNDS — one round is a walk down every source, not one
-   * source. Reset by a rendered frame, so only a genuinely broken episode
-   * exhausts the budget.
+   * THE FAILOVER BUDGET, AS ONE VALUE. See `FailBudget` for the loop this fixed:
+   * `load()` used to reset the two loose counters on every call, including the
+   * call a wrap-load makes, so the walk could never spend its budget and the
+   * player resolved and re-walked every source forever.
    */
-  const roundsRef = useRef(0);
+  const budgetRef = useRef<FailBudget>(freshBudget());
+  /** The stall recovery ladder's running state. See `lib/player/recovery.ts`. */
+  const recoveryRef = useRef<RecoveryState>(initialRecovery());
   /**
-   * When the CURRENT stretch of failing began, in wall-clock ms. The second
-   * failover budget — see `MAX_FAILOVER_WALL_MS`. Reset by the same events that
-   * reset `roundsRef` (a rendered frame, Retry, Change source, a fresh load);
-   * 0 means "not running".
+   * True while the current rung was chosen BY THE LADDER, not by the viewer.
+   *
+   * The difference is a disk write: a reduction earned on a train must not
+   * become the remembered quality of the series (`onFirstFrame` writes the
+   * proven rung). It still travels in memory, so a hop carries it.
    */
-  const failClockRef = useRef(0);
+  const autoQualityRef = useRef(false);
+  /** `bufferedPosition` at the previous health sample, to tell slow from dead. */
+  const lastBufferedRef = useRef(-1);
+  /** Extra first-frame windows granted to a source that is genuinely downloading. */
+  const frameWatchdogStretchRef = useRef(0);
+  /**
+   * A recovery is in flight and the picture is not.
+   *
+   * The ring's own guarantee. `seekPending` covers a seek and `health` covers a
+   * frozen playhead, but a hop, a bitrate step or an in-place reload all spend a
+   * moment with NO source attached — a state whose buffer readout is unknowable
+   * and whose first frame has not arrived, which used to render as a frozen
+   * frame with no feedback (the 4/7 → 5/7 report). Cleared by a rendered frame,
+   * the first `timeUpdate` after the action, or the error card.
+   */
+  const [recovering, setRecovering] = useState(false);
+  const recoverStreamRef = useRef<
+    (ahead: number | null, frozenMs: number, growing: boolean) => void
+  >(() => {});
   /**
    * WHICH load() owns the pipeline's next state writes.
    *
@@ -863,6 +932,17 @@ export default function LandscapePlayer() {
    */
   const desiredPlayingRef = useRef(true);
 
+  /**
+   * The player, for callbacks declared ABOVE it.
+   *
+   * `useVideoPlayer` comes after this watchdog in the component body, and a
+   * `player` reference in a dependency array is evaluated during that earlier
+   * render — a temporal dead zone rather than a lint complaint. A ref assigned
+   * once after creation is the same shape the presence and progress paths
+   * already use.
+   */
+  const playerRef = useRef<VideoPlayer | null>(null);
+
   const clearFrameWatchdog = useCallback(() => {
     if (frameWatchdogRef.current) clearTimeout(frameWatchdogRef.current);
     frameWatchdogRef.current = null;
@@ -897,6 +977,23 @@ export default function LandscapePlayer() {
       // viewer plays again and the window is still unanswered, never while
       // their finger holds the wheel.
       if (!desiredPlayingRef.current) {
+        armFrameWatchdog();
+        return;
+      }
+      /**
+       * SLOW IS NOT DEAD.
+       *
+       * Fourteen seconds of silence used to write a source off and hop, even
+       * when the pipeline was plainly downloading — a slow CDN at 480p takes
+       * longer than 14s to reach a first frame, and the hop threw away every
+       * byte it had. Media already buffered is proof the source WORKS, so it
+       * earns exactly one extra window. One only: a source that buffers but
+       * never renders is a decoder problem the recovery ladder handles with a
+       * soft reload, not something more patience can fix.
+       */
+      const bufferedNow = playerRef.current?.bufferedPosition ?? -1;
+      if (bufferedNow > 0 && frameWatchdogStretchRef.current < 1) {
+        frameWatchdogStretchRef.current += 1;
         armFrameWatchdog();
         return;
       }
@@ -945,6 +1042,9 @@ export default function LandscapePlayer() {
     p.staysActiveInBackground = false;
     applyTuning(p, tuningFor());
   });
+
+  // Read by the frame watchdog, which is declared before the player exists.
+  playerRef.current = player;
 
   /**
    * `statusChange` is deliberately NOT read through `useEvent` here.
@@ -1080,6 +1180,14 @@ useEffect(() => {
  * list without rebuilding the listener battery on each render.
  */
   const showCueAt = useCallback((playhead: number) => {
+    // PARKED WHILE THE PiP WINDOW IS COMING BACK — see `onPipStop` and
+    // `PIP_SUBS_SETTLE_MS`. Clearing rather than staying quiet matters: the line
+    // left on screen from before the exit is the one being painted into a band
+    // that is still moving, and that is the glitch the viewer sees.
+    if (Date.now() < subsHoldUntilRef.current) {
+      publishCue(null);
+      return;
+    }
     const armed = pendingSeek.current != null || resumeSeekAfterFrameRef.current != null;
     const at = cueLookupTime(playhead, armed);
     // A FRAME, not one cue: a sign and a voice line (or two voices) can be open
@@ -1127,6 +1235,12 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     firstFrameRef.current = true;
     setFirstFrame(true);
     clearFrameWatchdog();
+    // THE PICTURE IS BACK, so the failing stretch is over. The action count and
+    // the reload budget restart; the reductions that earned this frame do not
+    // (see `noteRecovered`), because re-offering the rung that starved is how a
+    // player ends up oscillating on a weak connection.
+    recoveryRef.current = noteRecovered(recoveryRef.current);
+    setRecovering((prev) => (prev ? false : prev));
     // Publish the cue for the frame that just landed, so subtitles are not
     // waiting for the next 120ms tick (or the next timeUpdate) to appear —
     // which on a resume from a saved position read as "subs take a moment to
@@ -1160,8 +1274,44 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // here rather than on a timer — otherwise a long session would eventually
     // refuse to fail over at all. The wall-clock budget resets with it: a
     // surviving frame ends the failing stretch those two bounds measure.
-    roundsRef.current = 0;
-    failClockRef.current = 0;
+    budgetRef.current = freshBudget();
+
+    /**
+     * 🎧 SILENCE IS A FAILURE MODE, AND NOTHING ELSE LOOKS FOR IT.
+     *
+     * See NO_AUDIO_GRACE_MS. The row is captured by IDENTITY: a source hop
+     * between the frame and the check must cancel the verdict, or the guard
+     * would blame the next source for this one being silent.
+     */
+    const sourceAtFrame = sourcesRef.current[srcIndexRef.current];
+    const watchForAudio = (delay: number, last: boolean) => {
+      audioGuardRef.current = setTimeout(() => {
+        audioGuardRef.current = null;
+        if (!mountedRef.current) return;
+        if (sourcesRef.current[srcIndexRef.current] !== sourceAtFrame) return;
+        // RELEASED-PLAYER GUARD. This timer outlives a back press by up to 3s,
+        // and `useVideoPlayer` releases the native object on unmount: reading a
+        // property then throws "cannot use shared object that was already
+        // released" from inside a setTimeout, which is a red box on the way out
+        // of the player, not a playback fault. The unmount cleanup clears this
+        // timer; this is the belt to that braces.
+        let tracks = 0;
+        try {
+          tracks = player.availableAudioTracks.length;
+        } catch {
+          return;
+        }
+        if (tracks > 0) return;
+        if (!last) {
+          watchForAudio(NO_AUDIO_RECHECK_MS, true);
+          return;
+        }
+        // Deliberately NOT a ledger trip: one silent server must not hide the
+        // provider's other rows, which are separate tokens on other hosts.
+        failoverRef.current(NO_AUDIO_MESSAGE);
+      }, delay);
+    };
+    watchForAudio(NO_AUDIO_GRACE_MS, false);
 
     // RECONCILE. A rendered frame is the one fact every failure verdict was
     // waiting for, and it outranks all of them. Every path that sets `error`
@@ -1210,7 +1360,10 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // (no selection) writes nothing here — `onPickQuality` is where an
     // explicit Auto CLEARS the memory.
     const locked = qualitySelRef.current;
-    if (locked && locked.src === srcIndexRef.current) {
+    // A rung the RECOVERY ladder stepped down into is a fact about this
+    // connection, not a preference for this show. Persisting it would make one
+    // slow minute the permanent quality of the series.
+    if (locked && locked.src === srcIndexRef.current && !autoQualityRef.current) {
       const label = variantsRef.current[locked.src]?.[locked.v]?.label;
       if (label && label !== qualityPrefRef.current) {
         qualityPrefRef.current = label;
@@ -1745,11 +1898,22 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   }, []);
 
   useEffect(
-    () => () => {
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-      if (frameWatchdogRef.current) clearTimeout(frameWatchdogRef.current);
-      // The "up next" card unmounts with this screen and clears its own
-      // countdown, so there is no timer left here to cancel.
+    () => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        if (frameWatchdogRef.current) clearTimeout(frameWatchdogRef.current);
+        // THE SILENCE CHECK OUTLIVES THE SCREEN OTHERWISE. It is a 3s+5s timer
+        // created on the first frame; backing out inside that window used to
+        // leave it armed against a player `useVideoPlayer` had already released,
+        // and reading `availableAudioTracks` then threw the "shared object that
+        // was already released" red box on the way out.
+        if (audioGuardRef.current) clearTimeout(audioGuardRef.current);
+        audioGuardRef.current = null;
+        // The "up next" card unmounts with this screen and clears its own
+        // countdown, so there is no timer left here to cancel.
+      };
     },
     []
   );
@@ -1757,7 +1921,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   // -------------------------------------------------------------------------
   // Loading
   // -------------------------------------------------------------------------
-  const load = useCallback(async (opts?: { fresh?: boolean }) => {
+  const load = useCallback(async (opts?: { fresh?: boolean; keepBudget?: boolean }) => {
     if (!linkOk) return;
     /**
      * A FRESH attempt ignores the return-trip cache.
@@ -1769,6 +1933,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
      * `load()` and may reuse the cache — that is the winning case.
      */
     const fresh = opts?.fresh === true;
+    /**
+     * A WRAP-LOAD CONTINUES A FAILING STRETCH. Every other load is a fresh
+     * decision by the viewer (or by the mount), and starts a new budget. Marking
+     * this one is what lets the walk reach `MAX_FAILOVER_ROUNDS` and give up
+     * instead of re-resolving forever.
+     */
+    const keepBudget = opts?.keepBudget === true;
     // EPOCH. Every await below is followed by a generation check, so a
     // superseded load (a Retry double-tap, a wrap-load over an in-flight
     // resolve) cannot write state that belongs to a dead attempt.
@@ -1878,8 +2049,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // No ring for a list that is already loading: `resolving` is the RESOLVE
     // spinner, and the cached one went straight to the player.
     setResolving(cached == null);
-    roundsRef.current = 0;
-    failClockRef.current = 0;
+    budgetRef.current = budgetOnLoad(budgetRef.current, keepBudget);
     rateLimitRetryUsedRef.current = false;
     if (rateLimitRetryTimerRef.current) {
       clearTimeout(rateLimitRetryTimerRef.current);
@@ -2022,7 +2192,6 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           const resume = await loadPositions(animeId);
           setSourceEpisodes(shown);
           setResumePositions(resume);
-          setEpisodeTitle(shown.find((e) => e.number === epNum)?.title ?? null);
           const mergedShown = mergeKitsuMeta(shown, peekKitsuEpisodes(animeId));
           const art = mergedShown.find((e) => e.number === epNum)?.poster ?? '';
           if (art) {
@@ -2166,6 +2335,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    */
   useEffect(() => {
     if (error) player.pause();
+    // The card replaces the ring: a recovery that ended in a verdict is not
+    // still recovering, and a ring behind the card would say otherwise.
+    if (error) setRecovering(false);
     // A switch that FAILED owes the screen back. Retry and Change source are the
     // only live controls left on the card, and a gate that outlived its resolve
     // would keep them behind a spinner that is no longer loading anything.
@@ -2217,6 +2389,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       return;
     }
 
+    // A HOP LEAVES THE PICTURE WITHOUT A SOURCE for a moment, and the ring is
+    // the honest answer for that window. Set here rather than at each of the
+    // walks's exits so no future exit can forget it.
+    setRecovering(true);
+
     if (reason && /429/.test(reason) && !rateLimitRetryUsedRef.current) {
       rateLimitRetryUsedRef.current = true;
       clearFrameWatchdog();
@@ -2235,7 +2412,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
 
     // START THE WALL CLOCK on the first failure of a stretch. Both budgets read
     // it; both are reset by a rendered frame, Retry, Change source and load().
-    if (!failClockRef.current) failClockRef.current = Date.now();
+    budgetRef.current = noteFailure(budgetRef.current, Date.now());
 
     /**
      * THE WRAP BOUNDARY — the walk reached the end of the list and wants a
@@ -2261,17 +2438,26 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // The decision lives in `lib/player/failover.ts` (`wrapVerdict`) — one
       // full walk per round, plus the wall-clock cap; `check-failover-budget.ts`
       // drives the real function.
-      const verdict = wrapVerdict(roundsRef.current, failClockRef.current, Date.now());
+      const verdict = wrapVerdict(budgetRef.current.rounds, budgetRef.current.sinceMs, Date.now());
       if (verdict === 'giveup') {
         clearFrameWatchdog();
         // The cached list has now failed its whole walk. Drop it so the next
         // visit re-resolves instead of resurrecting the same dead URLs. (The
         // error card's Retry asks for a fresh resolve directly.)
         dropResolveCache(animeId, epNum);
-        setError('No source could play this episode. Try again, or pick a different episode.');
+        setRecovering(false);
+        // A DIFFERENT SENTENCE WHEN THE LADDER WAS USED. "No source could play
+        // this episode" is wrong for a connection that played it fine until it
+        // ran out of headroom: the sources were not the problem, and the lever
+        // that helps (quality) is one the generic sentence never mentions.
+        setError(
+          recoveryRef.current.actions > 0
+            ? RECOVERY_EXHAUSTED_MESSAGE
+            : 'No source could play this episode. Try again, or pick a different episode.'
+        );
         return;
       }
-      roundsRef.current += 1;
+      budgetRef.current = spendRound(budgetRef.current);
       // Exhausted: fresh signed URLs, try the whole list again.
       // Preserve an already-pending target (e.g. a reconnect position) rather than
 // overwriting it with a playhead that may have been reset to 0 by a failed
@@ -2285,7 +2471,10 @@ if (pendingSeek.current == null) {
       // failure path. Starting a second resolve on top doubles the network
       // load for the same answer; the in-flight one will land, applyResolve
       // will repopulate the list at index 0, and the walk restarts from there.
-      if (!loadBusyRef.current) void load({ fresh: true });
+      // ⚠ `keepBudget: true` IS THE FIX for the endless loop: this load belongs
+      // to the stretch that is already failing, so it inherits the budget
+      // instead of resetting it and starting the walk over from nothing.
+      if (!loadBusyRef.current) void load({ fresh: true, keepBudget: true });
     };
 
     const i = srcIndexRef.current;
@@ -2404,9 +2593,141 @@ if (pendingSeek.current == null) {
   // nonce bump (used when the user re-picks the variant they are already on).
   const [reloadNonce, setReloadNonce] = useState(0);
 
+  /**
+   * THE RECOVERY LADDER, as this screen runs it.
+   *
+   * `decideRecovery` owns the ORDER (wait → less bitrate → soft reload →
+   * failover); this function owns the side effects, which is why it is not
+   * pure. The one rule that matters here: NOTHING in this function may touch
+   * the player while the ladder says `wait`. A stream that is still downloading
+   * is doing exactly what it should, just slowly.
+   */
+  const recoverStream = useCallback(
+    (ahead: number | null, frozenMs: number, growing: boolean) => {
+      if (offlineRef.current) {
+        // No radio is not a slow CDN. Mark the attempt so the reconnect path
+        // reopens it, and do not spend a single remedy on it.
+        offlineBlockedRef.current = true;
+        return;
+      }
+
+      const now = Date.now();
+      const si = srcIndexRef.current;
+      const ladder = variantsRef.current[si] ?? null;
+      const sel = qualitySelRef.current;
+      let rung: number | null = null;
+      if (ladder && ladder.length) {
+        if (sel && sel.src === si) rung = sel.v;
+        else {
+          // Auto: the observed height is the rung that is playing, so "one
+          // below it" is a real step down rather than a guess at the top.
+          const height = liveHeightRef.current;
+          const found = height == null ? 0 : ladder.findIndex((v) => (v.height ?? 0) <= height);
+          rung = found < 0 ? 0 : found;
+        }
+      }
+      const nextRung = ladder && rung != null && rung + 1 < ladder.length ? rung + 1 : null;
+
+      const decision = decideRecovery(
+        recoveryRef.current,
+        { ahead, frozenMs, growing, hasLadder: !!ladder?.length, nextRung },
+        now
+      );
+      recoveryRef.current = decision.state;
+
+      /** Where to come back to — read BEFORE the replace, like every other switch. */
+      const armResume = () => {
+        if (pendingSeek.current != null) return;
+        const at = Math.max(player.currentTime, positionRef.current);
+        if (at > 0) pendingSeek.current = at;
+      };
+
+      switch (decision.action.kind) {
+        case 'wait':
+          // The ring is already up (the verdict is `rebuffering`). Deliberately
+          // nothing else: this is the case that saves a slow connection.
+          return;
+        case 'lower-quality': {
+          const to = decision.action.to;
+          const label = ladder?.[to]?.label ?? null;
+          autoQualityRef.current = true;
+          qualitySelRef.current = { src: si, v: to };
+          setQualitySel(qualitySelRef.current);
+          // In memory only — `onFirstFrame` refuses to persist it.
+          if (label) qualityPrefRef.current = label;
+          // 🎧 DOWN WITHOUT A RELOAD, when the master muxes nothing: a separate
+          // audio rendition is lost by a variant swap, and a swap also throws
+          // away the buffered bytes the ladder is trying to protect. A ceiling
+          // steps the bitrate down in place. No `setRecovering` either — there
+          // is no reload to announce, and the ring comes from the health
+          // monitor, which already sees the frozen playhead.
+          if (ladder && ladder[0]?.separateAudio === true) {
+            try {
+              player.maxResolution = capFor(ladder[to]);
+            } catch {
+              /* the native player may already be released */
+            }
+            return;
+          }
+          armResume();
+          setRecovering(true);
+          setReloadNonce((n) => n + 1);
+          return;
+        }
+        case 'cap': {
+          // No ladder to step into (the master read failed on this very
+          // connection, which is itself evidence). `maxResolution` is a hard
+          // ABR ceiling on Android: the player re-selects its own track below it
+          // WITHOUT a reload, so this costs no buffer at all.
+          try {
+            player.maxResolution = {
+              width: Math.round((decision.action.height * 16) / 9),
+              height: decision.action.height,
+            };
+          } catch {
+            /* the native player may already be released */
+          }
+          setRecovering(true);
+          return;
+        }
+        case 'reload':
+          armResume();
+          setRecovering(true);
+          setReloadNonce((n) => n + 1);
+          return;
+        case 'failover':
+          // The budget bounds this, and it can now actually run out.
+          failoverRef.current();
+          return;
+      }
+    },
+    // Refs and setters only: the ladder reads the episode's caches through the
+    // refs it was handed, and `positionRef` is the playhead's own mirror. A
+    // dependency on `epNum` here would rebuild the callback mid-episode for no
+    // behaviour at all.
+    [player]
+  );
+  recoverStreamRef.current = recoverStream;
+
   useLayoutEffect(() => {
     const s = sources[srcIndex];
-    if (!s) return;
+    if (!s) {
+      /**
+       * NO ITEM AT THIS INDEX IS STILL AN ANSWER TO "IS THE SWITCH OVER?".
+       *
+       * This early return used to be silent, and `switchPending` is only ever
+       * cleared below it. A new episode whose source list is EMPTY, or shorter
+       * than the index the previous episode was on, therefore left the gate —
+       * and the first-load stage with it — up FOREVER: the device report was the
+       * loading screen sitting over an episode that was audibly playing, with the
+       * back arrow as the only exit. The stage covers the wait anyway (no frame
+       * yet), so the gate has nothing to hold; clear it and keep the media
+       * fence (`mediaSwitchRef`) exactly where it is, because no new item has
+       * landed to hand the playhead over to.
+       */
+      setSwitchPending(false);
+      return;
+    }
     let cancelled = false;
     // A new media item is here, so any episode switch is over: the playhead
     // from here on belongs to `epNum`. A layout effect, so this lands before
@@ -2452,11 +2773,33 @@ if (pendingSeek.current == null) {
     firstFrameRef.current = false;
     setFirstFrame(false);
     clearFrameWatchdog();
+    // A new item owes us a new silence verdict; the old timer would blame the
+    // source we just left.
+    if (audioGuardRef.current) {
+      clearTimeout(audioGuardRef.current);
+      audioGuardRef.current = null;
+    }
 
     // A locked variant on THIS source loads directly — that is what makes
     // "1080p from source 2" one replace instead of two.
+    //
+    // 🎧 UNLESS THE MASTER KEEPS ITS AUDIO SOMEWHERE ELSE. A variant playlist
+    // of a master with a separate audio rendition is video-only, so loading it
+    // gives a silent picture (the Katana report of 23 Nov — it appeared as soon
+    // as the recovery ladder started stepping down by itself). On such a master
+    // the rung is applied as an ABR CEILING instead: the item stays the master,
+    // the audio keeps arriving, the buffer survives, and Android re-selects its
+    // own track under the cap.
     const sel = qualitySel;
-    const variantUrl = sel && sel.src === srcIndex ? variantsBySource[sel.src]?.[sel.v]?.url : undefined;
+    const list = sel ? variantsBySource[sel.src] : undefined;
+    const picked = sel && sel.src === srcIndex ? list?.[sel.v] : undefined;
+    const separateAudio = !!list?.length && list[0]?.separateAudio === true;
+    const variantUrl = picked && !separateAudio ? picked.url : undefined;
+    try {
+      player.maxResolution = separateAudio ? capFor(picked) : null;
+    } catch {
+      /* the native player may already be released */
+    }
 
     const source: VideoSource = {
       uri: variantUrl ?? s.url,
@@ -2502,6 +2845,9 @@ if (pendingSeek.current == null) {
      * gets its full first-frame window; this only bounds the case where the
      * replace itself never comes back.
      */
+    // A new media item earns a fresh first-frame window: the previous item's
+    // extensions must not shorten this one's patience.
+    frameWatchdogStretchRef.current = 0;
     armFrameWatchdog();
     void player
       .replaceAsync(source)
@@ -2604,6 +2950,26 @@ if (pendingSeek.current == null) {
   // otherwise every speed change would re-resolve the episode.
   const speedRef = useRef(speed);
   speedRef.current = speed;
+
+  /**
+   * A NEW EPISODE STARTS THE LADDER OVER, and lifts the ABR ceiling with it.
+   *
+   * Deliberately keyed on `epNum` alone: a source hop or a bitrate step is part
+   * of the SAME episode's failing stretch, and resetting the ladder on those
+   * would let it step down forever — the exact shape that made the old
+   * auto-downgrade thrash. A new episode is a new decision.
+   */
+  useEffect(() => {
+    recoveryRef.current = initialRecovery();
+    autoQualityRef.current = false;
+    lastBufferedRef.current = -1;
+    frameWatchdogStretchRef.current = 0;
+    try {
+      player.maxResolution = null;
+    } catch {
+      /* the native player may already be released */
+    }
+  }, [epNum, player]);
 
   // -------------------------------------------------------------------------
   // Player events
@@ -2722,6 +3088,13 @@ if (pendingSeek.current == null) {
           seekIssuedAtRef.current = 0;
           setSeekPending((previous) => (previous ? false : previous));
         }
+
+        // A TICK IS A MOVING PICTURE. `timeUpdate` only arrives while frames are
+        // being produced, so it is the one event that proves a recovery worked —
+        // and the ring must come down on it even when the recovery was a
+        // `cap`, which re-selects a track without a replace and therefore fires
+        // no first-frame event at all.
+        setRecovering((previous) => (previous ? false : previous));
 
         if (!mediaSwitchRef.current && p.currentTime - lastSaved.current > SAVE_EVERY) {
           lastSaved.current = p.currentTime;
@@ -3023,6 +3396,8 @@ if (pendingSeek.current == null) {
     // was never the problem.
     healthRef.current = resetHealth(Date.now());
     setHealth(UNKNOWN_HEALTH);
+    // The buffer readout belongs to the media item that was just replaced.
+    lastBufferedRef.current = -1;
     // The "up next" card belongs to the media item that ENDED. A source,
     // quality or episode switch re-runs this effect; a card left up would jump
     // to the episode after a stale one.
@@ -3056,11 +3431,13 @@ if (pendingSeek.current == null) {
   const [qualityPhase, setQualityPhase] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'failed'>('idle');
   qualityPhaseRef.current = qualityPhase;
 
-  const gatherVariants = useCallback(async (force = false) => {
+  const gatherVariants = useCallback(async (force = false, only?: number[]) => {
     if (gatheringRef.current) return;
-    if (!force && variantsLoadedRef.current) return;
     const list = sourcesRef.current;
     if (list.length === 0) return;
+    const indexes = (only ?? list.map((_, i) => i)).filter((i) => i >= 0 && i < list.length);
+    if (!indexes.length) return;
+    if (!force && indexes.every((i) => variantsRef.current[i] !== undefined)) return;
     if (isOffline()) {
       setQualityPhase('failed');
       return;
@@ -3085,7 +3462,7 @@ if (pendingSeek.current == null) {
     };
 
     try {
-      let result = await readSubset(list.map((_, i) => i));
+      let result = await readSubset(indexes);
       if (attemptId !== gatherAttemptRef.current) return;
 
       // Retry is now LAZY: a failed read is left failed here, and only
@@ -3144,8 +3521,21 @@ if (pendingSeek.current == null) {
     gatherAttemptRef.current += 1;
     setQualityPhase('idle');
     setVariantsBySource({});
-    if (sources.length > 0) void gatherVariants();
+    // THE ACTIVE SOURCE ONLY. This used to read every source's master playlist
+    // in parallel the moment a resolve landed — seven round trips competing with
+    // the segment fetches the player is waiting on, on the connection that is
+    // already the reason the picture is thin. The active ladder is the one the
+    // recovery step needs; the rest are read when the quality menu is opened.
+    if (sources.length > 0) void gatherVariants(false, [srcIndexRef.current]);
   }, [sources, gatherVariants]);
+
+  // A hop needs the DESTINATION's ladder — it is what the recovery ladder steps
+  // down into if the new server is also too slow. One read, on arrival.
+  useEffect(() => {
+    if (sources.length === 0) return;
+    if (variantsBySource[srcIndex] !== undefined) return;
+    void gatherVariants(false, [srcIndex]);
+  }, [srcIndex, sources.length, variantsBySource, gatherVariants]);
 
   // Menu open is the viewer asking "what is actually available", so a failed
   // gather gets another attempt there instead of staying broken until a
@@ -3153,7 +3543,12 @@ if (pendingSeek.current == null) {
   // while the same episode is open.
   useEffect(() => {
     if (menu !== 'quality') return;
-    if (qualityPhase === 'failed') void gatherVariants(true);
+    // THE MENU IS WHERE THE REST OF THE LIST IS READ. Its rows are one per
+    // distinct label across every source, so opening it is the moment the full
+    // gather is worth its requests — and it is the viewer asking, not a
+    // background prefetch competing with the segment the player needs.
+    const partial = sourcesRef.current.some((_, i) => variantsRef.current[i] === undefined);
+    if (qualityPhase === 'failed' || partial) void gatherVariants(true);
     else if (qualityPhase === 'idle') void gatherVariants();
   }, [menu, qualityPhase, gatherVariants]);
 
@@ -3184,6 +3579,23 @@ if (pendingSeek.current == null) {
     });
   }, [sources, variantsBySource, srcIndex]);
 
+  /**
+   * A VIEWER DECISION RESTARTS EVERY AUTOMATIC VERDICT.
+   *
+   * The ladder's reductions were answers to a connection; picking a quality or
+   * a server is the viewer saying the question has changed. Both the counters
+   * and the ABR ceiling go back to zero, so the next stall is judged on its own.
+   */
+  const resetAutoRecovery = useCallback(() => {
+    recoveryRef.current = initialRecovery();
+    autoQualityRef.current = false;
+    try {
+      player.maxResolution = null;
+    } catch {
+      /* the native player may already be released */
+    }
+  }, [player]);
+
   const onPickQuality = useCallback(
     (key: string) => {
       if (key === '__retryq') {
@@ -3195,6 +3607,9 @@ if (pendingSeek.current == null) {
       // Any manual pick — a rung OR Auto — is the viewer steering. The
       // default-quality applier stands down for the rest of this attempt.
       qualityChosenRef.current = true;
+      // …and the ladder's verdicts about this connection do not survive the
+      // viewer choosing something else.
+      resetAutoRecovery();
       // Capture where the viewer is BEFORE the replace, so the switch lands back
       // there instead of at 0:00. `player.currentTime` is read synchronously
       // here rather than from `position`, because `position` trails the real
@@ -3221,7 +3636,18 @@ if (pendingSeek.current == null) {
         const pickedLabel = variantsRef.current[src]?.[v]?.label ?? null;
         qualityPrefRef.current = pickedLabel;
         if (pickedLabel) void saveQualityPref(animeId, pickedLabel);
-        if (src !== srcIndexRef.current) {
+        if (src === srcIndexRef.current && variantsRef.current[src]?.[0]?.separateAudio === true) {
+          // 🎧 GAPLESS. The rung on this master is a ceiling, not a URL: the
+          // stream is never re-opened, so nothing buffers again and the audio
+          // rendition is never dropped. This is what a real player does when
+          // you pick a quality — the picture simply re-seats itself.
+          try {
+            player.maxResolution = capFor(variantsRef.current[src]?.[v]);
+          } catch {
+            /* the native player may already be released */
+          }
+          pendingSeek.current = null;
+        } else if (src !== srcIndexRef.current) {
           pendingSeek.current = at;
           setSrcIndex(src);
         } else {
@@ -3231,7 +3657,7 @@ if (pendingSeek.current == null) {
       }
       setMenu(null);
     },
-    [player, gatherVariants, animeId]
+    [player, gatherVariants, animeId, resetAutoRecovery]
   );
 
   /**
@@ -3299,6 +3725,8 @@ if (pendingSeek.current == null) {
 
   const onPickSource = useCallback(
     (key: string) => {
+      // Both paths are a viewer decision about this connection.
+      resetAutoRecovery();
       if (key === '__refresh') {
         const currentExt = sourcesRef.current[srcIndexRef.current]?.extId;
         if (currentExt) void saveSourcePref(animeId, currentExt);
@@ -3315,8 +3743,7 @@ if (pendingSeek.current == null) {
   const at = player.currentTime;
   if (at > 0) pendingSeek.current = at;
 }
-        roundsRef.current = 0;
-        failClockRef.current = 0;
+        budgetRef.current = freshBudget();
         void load({ fresh: true });
         setMenu(null);
         return;
@@ -3357,7 +3784,7 @@ if (pendingSeek.current == null) {
       void saveSourcePref(animeId, picked?.extId);
       setMenu(null);
     },
-    [player, animeId, load, qualityForSource, bumpLedger]
+    [player, animeId, load, qualityForSource, bumpLedger, resetAutoRecovery]
   );
 
   // -------------------------------------------------------------------------
@@ -3428,6 +3855,14 @@ if (pendingSeek.current == null) {
         return;
       }
 
+      // IS ANYTHING STILL ARRIVING? Sampled EVERY tick so the ladder's answer is
+      // a one-second window rather than the last time it happened to act — a
+      // slow connection is exactly the case where "the buffer grew a little,
+      // just far too slowly" must be distinguishable from "nothing came back".
+      const bufferedNow = player.bufferedPosition;
+      const grew = lastBufferedRef.current >= 0 && bufferedNow > lastBufferedRef.current + 0.25;
+      lastBufferedRef.current = bufferedNow;
+
       const at = Date.now();
       const verdict = observeHealth(
         readHealth(at),
@@ -3494,9 +3929,11 @@ if (pendingSeek.current == null) {
        */
 
       if (verdict.health.kind === 'stalled') {
-        // One round of the budget, the same one every other dead-source path
-        // spends. `failover` is what bounds this, and it is bounded on purpose.
-        failoverRef.current();
+        // NOT a failover any more. Hopping servers throws away every byte
+        // already buffered — the one thing a starved stream cannot afford — so
+        // the ladder asks for less bitrate first, then reloads in place, and
+        // only then walks on. The failover budget bounds the walk.
+        recoverStreamRef.current(verdict.health.ahead, verdict.health.frozenMs, grew);
       }
     };
 
@@ -3587,6 +4024,22 @@ if (pendingSeek.current == null) {
         backgroundHoldRef.current = true;
         desiredPlayingRef.current = false;
         player.pause();
+        // THE SAVE THAT IS NOT AN UNMOUNT. The 10s backstop and the unmount
+        // cleanup both assume the process is still alive to run them, and a
+        // phone that backgrounds a paused player is precisely the one that gets
+        // killed by the OS without ever unmounting this screen. That leaves the
+        // stored position up to `SAVE_EVERY` behind — the viewer comes back to
+        // a resume that is ten seconds off from where they stopped, for no
+        // reason they can see. Written here, at the one moment we know the
+        // picture has stopped on purpose.
+        //
+        // The guards are the same ones every other write keeps: a malformed
+        // deep link never produces a `NaN` key, a switch in flight belongs to
+        // the OUTGOING episode's playhead, and under five seconds is not a
+        // position worth resuming from.
+        if (linkOk && !mediaSwitchRef.current && positionRef.current > 5) {
+          void savePosition(animeId, epNum, positionRef.current);
+        }
       }, PIP_HANDOFF_GRACE_MS);
     });
 
@@ -3596,7 +4049,7 @@ if (pendingSeek.current == null) {
       pipExitTimerRef.current = null;
       sub.remove();
     };
-  }, [player]);
+  }, [player, animeId, epNum, linkOk]);
 
   /**
    * A REMOTE PLAY IS NOT THE VIEWER'S PLAY.
@@ -3795,8 +4248,8 @@ if (pendingSeek.current == null) {
     // the button appears to do nothing. `load()` resets both budgets at its
     // top; these lines cover the same intention explicitly so the handler does
     // not silently depend on that ordering.
-    roundsRef.current = 0;
-    failClockRef.current = 0;
+    budgetRef.current = freshBudget();
+    resetAutoRecovery();
     if (isOffline()) {
       offlineBlockedRef.current = true;
       setFailure(null);
@@ -3805,7 +4258,7 @@ if (pendingSeek.current == null) {
       return;
     }
     void load({ fresh: true });
-  }, [load]);
+  }, [load, resetAutoRecovery]);
 
   /**
    * The error card's second exit, and genuinely different from Retry.
@@ -3822,9 +4275,10 @@ if (pendingSeek.current == null) {
    * further away than the only decision actually worth making here.
    */
   const onChangeSource = useCallback(() => {
-    // A fresh decision by the viewer: both failover budgets restart.
-    roundsRef.current = 0;
-    failClockRef.current = 0;
+    // A fresh decision by the viewer: the budget and every automatic verdict
+    // about this connection restart with it.
+    budgetRef.current = freshBudget();
+    resetAutoRecovery();
     const i = srcIndexRef.current;
     if (sourcesRef.current.length > 1) {
       // Preserve an already-pending target (e.g. a reconnect position) rather than
@@ -3840,7 +4294,7 @@ if (pendingSeek.current == null) {
     } else {
       void load({ fresh: true });
     }
-  }, [player, load]);
+  }, [player, load, resetAutoRecovery]);
 
   const onBack = useCallback(() => {
     if (router.canGoBack?.()) router.back();
@@ -3870,12 +4324,19 @@ if (pendingSeek.current == null) {
    */
   const onPipStart = useCallback(() => {
     pipActiveRef.current = true;
+    setPipOn(true);
     backgroundHoldRef.current = false;
     if (pipHandoffTimerRef.current) clearTimeout(pipHandoffTimerRef.current);
     pipHandoffTimerRef.current = null;
     showControlsRef.current = false;
     setChromeVisible(false);
     setMenu(null);
+    // NO LINE FROZEN IN THE DRAWER. While the window is up the native side hides
+    // every view (see `pipOn`), so the live cue frame would be the last one from
+    // before the handoff — and that stale line is the first thing painted when
+    // the viewer expands again, over a playhead that has moved on. Cleared here,
+    // it cannot be what they come back to.
+    publishCue(null);
   }, []);
 
   /**
@@ -3887,6 +4348,12 @@ if (pendingSeek.current == null) {
    */
   const onPipStop = useCallback(() => {
     pipActiveRef.current = false;
+    setPipOn(false);
+    // Park the subtitles until the window has finished resizing (PIP_SUBS_SETTLE_MS
+    // in `lib/player/pip.ts`) — publishing through that layout is the "subs jump
+    // when I come back" glitch. See the ref for the full picture.
+    publishCue(null);
+    subsHoldUntilRef.current = Date.now() + PIP_SUBS_SETTLE_MS;
     if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
     pipExitTimerRef.current = setTimeout(() => {
       pipExitTimerRef.current = null;
@@ -4341,6 +4808,17 @@ if (pendingSeek.current == null) {
         disabled: true,
       });
     });
+    // NOTHING TO PICK YET is a state, not an empty sheet. The picker used to
+    // draw a title over a blank panel while the resolve was still in flight,
+    // which reads as a provider outage rather than as a wait.
+    if (sources.length === 0) {
+      rows.push({
+        key: '__resolving',
+        label: resolving ? 'Finding sources…' : 'No sources',
+        hint: resolving ? undefined : 'Tap Refresh once the episode is loaded',
+        disabled: true,
+      });
+    }
     if (sources.length > 0) {
       rows.push({
         key: '__refresh',
@@ -4349,7 +4827,7 @@ if (pendingSeek.current == null) {
       });
     }
     return rows;
-  }, [sources, srcIndex, failedSources, ledgerTick]);
+  }, [sources, srcIndex, failedSources, ledgerTick, resolving]);
 
   const subRows: MenuRow[] = useMemo(() => {
     const rows: MenuRow[] = [
@@ -4637,8 +5115,20 @@ if (pendingSeek.current == null) {
       return;
     }
     desiredPlayingRef.current = !desiredPlayingRef.current;
-    if (willPause) player.pause();
-    else {
+    if (willPause) {
+      // PAUSING IS LEAVING. The stored position is written every `SAVE_EVERY`
+      // seconds and again on unmount, so a pause could leave the resume up to
+      // ten seconds behind — and a pause is exactly when a viewer walks away,
+      // locks the phone, or gets interrupted for an hour. Same guards as every
+      // other write (valid link, no switch in flight, past the five-second
+      // floor), and `positionRef` rather than `player.currentTime` for the same
+      // reason the unmount save uses it: it is the mirror that survives a
+      // replace, so the value cannot be the 0 a reload briefly reported.
+      if (linkOk && !mediaSwitchRef.current && positionRef.current > 5) {
+        void savePosition(animeId, epNum, positionRef.current);
+      }
+      player.pause();
+    } else {
       // PARKED AT THE END. The stream ran out and nothing follows, so the
       // engine sits in its ended state where a bare `play()` does nothing
       // — the tap that should replay the episode would be swallowed. Jump
@@ -4649,7 +5139,7 @@ if (pendingSeek.current == null) {
       player.play();
     }
     pokeControls();
-  }, [player, pokeControls, seekWithGrace]);
+  }, [player, pokeControls, seekWithGrace, animeId, epNum, linkOk]);
   const subsStyleProp = useMemo(
     () => ({
       size: subsSize,
@@ -4805,13 +5295,42 @@ if (pendingSeek.current == null) {
   const switching = switchPending && resolving;
   switchingRef.current = switching;
 
+  const stageUp = (!firstFrame || switchPending) && !error && !offline && desiredPlayingRef.current;
+
+  /**
+   * ONE LAYER AT A TIME — the stage REPLACES the controls; it does not sit
+   * behind them.
+   *
+   * The first version of the stage was a cover mounted under the chrome, and on
+   * a phone that read as two screens drawn on top of each other: the poster with
+   * its ring and "Finding a source…" underneath, and a paused timeline at 0:00
+   * with four trigger chips and a play button on top of it. Every one of those
+   * controls is a lie during a scrape — there is no duration, no position, no
+   * quality to pick and nothing to pause — so the frame was showing the viewer
+   * the exact opposite of what was happening.
+   *
+   * So the load state TAKES the controls' place, the way Netflix's and
+   * YouTube's do: while the stage is up the bars and the transport are off (the
+   * bottom bar stays MOUNTED and invisible — its measured height is the subtitle
+   * floor and the skip seat, and unmounting it would make both jump), and the
+   * stage's ring stands in the transport's seat. When the first frame lands the
+   * gate drops and the real chrome comes back in the same commit — loading
+   * becomes controls, controls become loading.
+   *
+   * The BACK ARROW IS THE EXCEPTION, and it is the same exception the transition
+   * gate already makes: a screen with no exit is never acceptable, so `TopBar`
+   * keeps its `off` mode (arrow only, at its own seat, with the contrast disc
+   * the gradient used to provide).
+   */
+  const controlsOff = switching || stageUp;
+
   const buffering =
     desiredPlayingRef.current &&
     // Nothing is loading when the episode has ENDED with the next one queued:
     // the card is up, and a ring over the last frame would claim a load that is
     // not happening (the countdown is waiting for the viewer, not the network).
     upNext == null &&
-    (resolving || seekPending || (!firstFrame && !playbackProgress) || health.kind === 'rebuffering' || health.kind === 'stalled') &&
+    (resolving || seekPending || recovering || (!firstFrame && !playbackProgress) || health.kind === 'rebuffering' || health.kind === 'stalled') &&
     !error &&
     !offline;
 
@@ -4828,16 +5347,7 @@ if (pendingSeek.current == null) {
     return (
       <View style={styles.root}>
         <StatusBar hidden />
-        <View style={styles.errorBox} pointerEvents="box-none">
-          <AppIcon name="alert" size={30} color="#FF6B6B" strokeWidth={2} />
-          <Text style={styles.errorTitle}>That link is not an episode</Text>
-          <Text style={styles.errorBody}>
-            Miori could not read an anime and episode number out of this address.
-          </Text>
-          <Pressable onPress={onBack} style={styles.errorBtn} accessibilityRole="button">
-            <Text style={styles.errorBtnText}>Go back</Text>
-          </Pressable>
-        </View>
+        <InvalidLinkCard onBack={onBack} />
       </View>
     );
   }
@@ -4875,7 +5385,25 @@ if (pendingSeek.current == null) {
 
       {/* A scrim only while the chrome is up, so the title and timeline stay
           readable over a bright frame without dimming the video at rest. */}
-      <Scrim locked={locked} panelOpen={panelOpen} menu={menu} scrubActive={scrubActive} />
+      {/* No scrim behind the stage: its gradients exist to keep the title and
+          the timeline readable over a live frame, and during a load there is
+          neither — they would just dim the art the stage is already dimming. */}
+      {stageUp ? null : (
+        <Scrim locked={locked} panelOpen={panelOpen} menu={menu} scrubActive={scrubActive} />
+      )}
+
+      {stageUp ? (
+        <LoadingStage
+          // Banner first: it is the widest art AniList has, and at 50% opacity
+          // behind a 74% wash only the colour field survives anyway.
+          art={mediaDetail?.bannerImage ?? mediaDetail?.coverImage?.extraLarge ?? null}
+          episode={epNum}
+          episodeTitle={episodeTitle}
+          // The order is the order things actually happen; `resolving` is the
+          // scrape, and it outranks a stale `recovering` from the previous item.
+          phase={resolving ? 'resolving' : recovering ? 'recovering' : 'loading'}
+        />
+      ) : null}
 
       <GestureSurface
         // NOT `!locked`. The gesture surface has to stay live while the controls
@@ -4888,7 +5416,13 @@ if (pendingSeek.current == null) {
         // a single tap would only raise an overlay that describes that item. The
         // exit during a transition is the back arrow `TopBar` keeps in its
         // `off` mode, not a tap.
-        enabled={!menu && !panelOpen && !switching}
+        // PiP disables the surface as well: a tap in a 200dp window must land
+        // on the one control in it, not raise a full-size chrome scaled down.
+        // THE STAGE TAKES IT TOO. There is nothing on this frame to seek or to
+        // pause while the episode is being scraped, so a tap can only raise a
+        // chrome that would be wrong about every value on it. The exit during a
+        // load is the back arrow, exactly as it is during a transition.
+        enabled={!menu && !panelOpen && !switching && !pipOn && !stageUp}
         locked={locked}
         swipeSides={swipeSides}
         boostRate={boostRate}
@@ -4907,7 +5441,7 @@ if (pendingSeek.current == null) {
         onPip={onPip}
         pipAvailable={pipSupported}
         locked={locked}
-        off={switching}
+        off={controlsOff}
         insets={insets}
       />
 
@@ -4921,7 +5455,7 @@ if (pendingSeek.current == null) {
         // must not show without a word. The seek's own issue is the honest
         // signal; the ring clears from the `timeUpdate` listener the moment
         // frames resume.
-        buffering={buffering}
+        buffering={buffering && !stageUp}
         hasPrev={epNum > 1}
         // Aired, not the season total: ⏭ must dim on the last RELEASED episode
         // of an airing show, exactly where the countdown declines to fire.
@@ -4929,7 +5463,7 @@ if (pendingSeek.current == null) {
         onPlayPause={onPlayPause}
         onPrev={onPrev}
         onNext={onNext}
-        off={switching}
+        off={controlsOff}
       />
 
       <BottomBar
@@ -4956,7 +5490,7 @@ if (pendingSeek.current == null) {
         onMeasure={onBarMeasure}
         initialTrackWidth={trackWidthRef.current}
         onTrackWidth={onTrackWidth}
-        off={switching}
+        off={controlsOff}
       />
 
       {/**
@@ -4974,7 +5508,9 @@ if (pendingSeek.current == null) {
         panelOpen={panelOpen}
         scrubActive={scrubActive}
         barHeight={barHeight}
-        switching={switching}
+        // A skip button floating over the loading art is the same two-layers
+        // problem as the bar: it names a moment in an episode with no picture.
+        switching={controlsOff}
         insets={insets}
         seekWithGrace={seekWithGrace}
         player={player}
@@ -5075,6 +5611,7 @@ if (pendingSeek.current == null) {
       <EpisodePanel
         visible={panelOpen}
         episodes={episodes}
+        loading={resolving}
         current={epNum}
         onPick={onPickEpisode}
         onClose={onClosePanel}
@@ -5083,77 +5620,15 @@ if (pendingSeek.current == null) {
       />
 
       {error ? (
-        <Animated.View entering={FadeIn} style={styles.errorBox} pointerEvents="box-none">
-          <AppIcon name="alert" size={30} color="#FF6B6B" strokeWidth={2} />
-          <Text style={styles.errorTitle}>
-            {error === OFFLINE_MESSAGE ? "You're offline" : 'Playback failed'}
-          </Text>
-
-          {/**
-           * THE CAUSE FIRST, IN THE VIEWER'S TERMS.
-           *
-           * `failure` is `describeFailure`'s verdict on the engine's own
-           * message, and it leads because it is the only line that tells anyone
-           * what to do. The raw message follows underneath in a smaller, dimmer
-           * style — kept, not replaced, because it is the only part of this
-           * screen a bug report can use, and a classification that discarded it
-           * would be substituting a guess for a fact.
-           *
-           * The `error` string is the fallback for the two failures that never
-           * come from the player at all: the resolve deadline, and an AniList or
-           * extension request that failed before there was ever a source to play.
-           * Showing both would be noise, and showing neither would be silence.
-           */}
-          <Text style={styles.errorBody}>{failure ? failure.headline : error}</Text>
-          {failure && failure.detail !== failure.headline ? (
-            <Text style={styles.errorDetail} numberOfLines={3}>
-              {failure.detail}
-            </Text>
-          ) : null}
-
-          {/**
-           * WHAT WAS ACTUALLY TRIED, because "it failed" and "it failed on all
-           * three mirrors" are different reports and the viewer is about to make
-           * a decision — retry, switch, or leave — on the strength of them.
-           * Deliberately counts SOURCES rather than attempts; the retry budget
-           * is three rounds over the same list, so saying "9 attempts" would
-           * describe a mechanism rather than a situation.
-           */}
-          {sources.length > 1 ? (
-            <Text style={styles.errorDetail}>
-              Tried all {sources.length} sources.
-            </Text>
-          ) : null}
-
-          {/**
-           * THREE OUTWAYS, AND NOT ONE OF THEM IS OPTIONAL.
-           *
-           * It was a single "Try again" over a full-screen opaque panel. On iOS
-           * — where there is no hardware back button and the stack's header is
-           * hidden on this route — that left exactly one control on the screen
-           * and no way out of it. Even on Android, where the hardware button
-           * does work, "Try again" against a dead CDN is a loop with no exit,
-           * and the source list is the one input that can actually change the
-           * outcome.
-           *
-           * "Change source" restarts the failover walk from the top rather than
-           * waiting out the remaining budget, which is what makes it different
-           * from Retry rather than a second spelling of it.
-           */}
-          <View style={styles.errorActions}>
-            <Pressable onPress={onRetry} style={styles.errorBtn} accessibilityRole="button">
-              <Text style={styles.errorBtnText}>Try again</Text>
-            </Pressable>
-            {sources.length > 1 ? (
-              <Pressable onPress={onChangeSource} style={styles.errorBtnAlt} accessibilityRole="button">
-                <Text style={styles.errorBtnText}>Change source</Text>
-              </Pressable>
-            ) : null}
-            <Pressable onPress={onBack} style={styles.errorBtnGhost} accessibilityRole="button">
-              <Text style={styles.errorBtnGhostText}>Back</Text>
-            </Pressable>
-          </View>
-        </Animated.View>
+        <PlaybackErrorCard
+          offline={error === OFFLINE_MESSAGE}
+          headline={failure ? failure.headline : error}
+          detail={failure && failure.detail !== failure.headline ? failure.detail : null}
+          sourceCount={sources.length}
+          onRetry={onRetry}
+          onChangeSource={onChangeSource}
+          onBack={onBack}
+        />
       ) : null}
     </View>
   );
@@ -5267,89 +5742,6 @@ const styles = StyleSheet.create({
     fontFamily: font.semibold,
     fontSize: 13,
     lineHeight: 16,
-  },
-  errorBox: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(0,0,0,0.86)',
-    paddingHorizontal: 32,
-  },
-  errorTitle: {
-    color: '#fff',
-    fontFamily: font.bold,
-    fontSize: 17,
-  },
-  errorBody: {
-    color: 'rgba(255,255,255,0.7)',
-    fontFamily: font.regular,
-    fontSize: 13,
-    lineHeight: 19,
-    textAlign: 'center',
-    maxWidth: 380,
-  },
-  /**
-   * The engine's own words, and the "tried N sources" count.
-   *
-   * Dimmer and smaller than `errorBody` on purpose: this is evidence, not the
-   * headline. It is also the only part of this screen a bug report can use, so
-   * it is shown rather than summarised — see `failure.detail`'s contract in
-   * `lib/player/failure.ts`.
-   */
-  errorDetail: {
-    color: 'rgba(255,255,255,0.42)',
-    fontFamily: font.mono,
-    fontSize: 11,
-    lineHeight: 16,
-    textAlign: 'center',
-    maxWidth: 400,
-  },
-  errorActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginTop: 14,
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-  },
-  errorBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    borderRadius: radii.full,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-  },
-  errorBtnAlt: {
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    borderRadius: radii.full,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-  },
-  /**
-   * "Back" is visually the quietest of the three, and deliberately so.
-   *
-   * It is the only one that is always safe, so it must not compete with the two
-   * that are guesses about what went wrong. A 44pt touch target on a ghost
-   * button, so the styling can recede without the target doing the same.
-   */
-  errorBtnGhost: {
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderRadius: radii.full,
-  },
-  errorBtnText: {
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 13,
-  },
-  errorBtnGhostText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontFamily: font.medium,
-    fontSize: 13,
   },
   customSpeedCard: {
     position: 'absolute',

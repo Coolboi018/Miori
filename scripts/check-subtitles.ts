@@ -924,7 +924,7 @@ console.log('\n[player wiring]');
   // One implementation of the cue lookup. It was duplicated — the lib's `cueAt`
   // and a private `findCueAt` in the player — and only one of them could be
   // fixed by editing the lib.
-  const dupes = ['components/player/SubtitleOverlay.tsx', 'components/player/fullscreen/PlayerScreen.tsx', 'components/player/legacy/VerticalPlayerScreen.tsx']
+  const dupes = ['components/player/SubtitleOverlay.tsx', 'components/player/fullscreen/PlayerScreen.tsx']
     .map((f) => [f, code(f)] as const)
     .filter(([, src]) => /findCueAt/.test(src))
     .map(([f]) => f);

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Miori",
     "slug": "Miori",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "miori",
@@ -64,7 +64,8 @@
       "expo-image",
       "expo-font",
       "expo-status-bar",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-splash-screen"
     ],
     "extra": {
       "router": {

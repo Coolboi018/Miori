@@ -82,3 +82,22 @@ export function shouldAutoEnterPip(supported: boolean, playing: boolean): boolea
 export function shouldHoldPlayback(stage: PlaybackStage): boolean {
   return stage === 'background';
 }
+
+/**
+ * How long subtitle publishing stays parked after a PiP exit.
+ *
+ * The PiP window is the SAME ACTIVITY at a different size: expanding it restores
+ * every view `layoutForPiPEnter` set to `View.GONE` and animates the window from
+ * the floating rect to the full frame. Through that animation the subtitle stage
+ * measures itself against a window that is neither size, so a line published into
+ * it is placed against a band that is about to move — the device report was
+ * "subtitles glitch up for a second when I come back from PiP".
+ *
+ * So nothing is drawn for this window instead. The viewer is looking at a frame
+ * that is still resizing, the audio is untouched, and the first honest line
+ * arrives from the next playhead sample (the 120ms cue tick, or the 0.5s
+ * `timeUpdate` if that tick is throttled on the way back).
+ *
+ * 0.6s: past an expand animation, far inside the length of a sentence.
+ */
+export const PIP_SUBS_SETTLE_MS = 600;

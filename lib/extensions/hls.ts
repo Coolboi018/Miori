@@ -1,7 +1,19 @@
 // HLS variant handling — manual quality selection.
-// expo-video exposes videoTrack as read-only (ABR only), so forcing a
-// quality means loading that variant playlist URL directly instead of
-// the master. "Auto" = master URL (ABR decides), "1080p" = variant URL.
+//
+// "Auto" = the master URL (ABR decides), "1080p" = that variant's URL.
+//
+// 🎧 A VARIANT URL IS NOT ALWAYS A SUBSTITUTE FOR THE MASTER.
+// When the master declares its audio as a separate rendition
+// (
+//   #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",URI="audio/en.m3u8"
+// )
+// the variant playlists carry VIDEO ONLY: the audio arrives from that other
+// playlist, which only the master knows to fetch. Loading one variant directly
+// therefore plays a silent picture — the Katana "video but no sound" report of
+// 23 Nov, which appeared the moment the app started stepping down a ladder
+// automatically. `separateAudio` is what tells the player to pin the rung with
+// `maxResolution` instead of swapping the URL.
+import { masterHasSeparateAudio } from '../player/rung';
 import { fetchText } from './fetch';
 
 export interface HlsVariant {
@@ -10,7 +22,15 @@ export interface HlsVariant {
   width?: number;
   height?: number;
   label: string;
+  /**
+   * The master keeps its audio in a SEPARATE rendition, so this variant URL is
+   * video-only. Loading it loses the sound; see the header.
+   */
+  separateAudio?: boolean;
 }
+
+// `masterHasSeparateAudio` lives in `lib/player/rung.ts` — pure, and driven by
+// `scripts/check-stream-recovery.ts` without pulling in expo-network.
 
 export async function listVariants(
   masterUrl: string,
@@ -18,6 +38,7 @@ export async function listVariants(
 ): Promise<HlsVariant[]> {
   const text = await fetchText(masterUrl, 12000, { headers }, 'variants');
   const lines = text.split('\n').map((l) => l.trim());
+  const separateAudio = masterHasSeparateAudio(text);
   const out: HlsVariant[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -41,6 +62,7 @@ export async function listVariants(
         width: rs ? parseInt(rs[1], 10) : undefined,
         height,
         label: height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)}k` : '?:',
+        separateAudio,
       });
     } catch {
       /* skip */

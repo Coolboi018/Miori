@@ -107,8 +107,13 @@ export function usePlayerMenuRows({
           qualityPhase === 'loading'
             ? 'Loading…'
             : qualityPhase === 'failed'
-              ? 'Retrying failed'
-              : undefined,
+              ? 'Could not read the list'
+              : liveHeight != null
+                ? // Auto IS a decision, and this says what it decided. Without
+                  // it the sheet reads "Auto ✓" next to a chip that says 720p,
+                  // which looks like the picker disagreeing with the picture.
+                  `now ${liveHeight}p`
+                : undefined,
         selected: qualitySel === null,
       },
     ];

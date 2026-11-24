@@ -352,6 +352,18 @@ verify(
   /gatherVariants\(false, \[srcIndexRef\.current\]\)/.test(screen),
   'reading every master playlist in parallel competes with the segment the player is waiting for'
 );
+// THE 24 NOV PREVIEW — the endless "Loading qualities…" sheet.
+verify(
+  'the quality gather asks each source ONCE per list',
+  /gatherTriedRef\.current\.has\(i\)/.test(screen) &&
+    /gatherTriedRef\.current\.add\(i\)/.test(screen),
+  'a failed master is stored nowhere (undefined), so a state-driven retry re-read EVERY source on every commit'
+);
+verify(
+  'the quality sheet retries at most once per open',
+  /sheetRetriedRef\.current = true/.test(screen),
+  'one fair re-read on the viewer opening the sheet; a second is the hammer that flashed the rows'
+);
 verify(
   'a rendered frame clears the recovery ring',
   /recoveryRef\.current = noteRecovered/.test(screen),

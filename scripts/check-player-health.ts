@@ -778,6 +778,12 @@ check(
   'two watchdogs answering one failure spends two rounds of the budget'
 );
 check(
+  'a moving clock lifts the load stage even without the first-frame event',
+  /const pictureUp = firstFrame \|\| playbackProgress;/.test(screen) &&
+    /const stageUp = \(!pictureUp \|\| switchPending\)/.test(screen),
+  'onFirstFrameRender can be missed (Expo Go, a VideoView remount), and the episode then plays behind a stage that never lifts'
+);
+check(
   'the health tick does nothing while the app is not in the foreground',
   /if \(!appActiveRef\.current\) return;/.test(screen) &&
     /appActiveRef\.current = next === 'active'/.test(screen),

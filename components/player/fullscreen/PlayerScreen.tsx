@@ -1053,10 +1053,10 @@ export default function LandscapePlayer() {
   // -------------------------------------------------------------------------
   const player = useVideoPlayer(null, (p) => {
     p.timeUpdateEventInterval = 0.5;
-    // Keep the screen on regardless of playing state: a paused frame with the
-    // screen dimmed mid-episode reads as the app having hung.
-    // Keep-awake is driven by the focused + playing effect above; default off so
-    // a freshly created player never lights the screen on its own.
+    // The screen wake lock is NOT the player's own: it is driven by
+    // `screenAwake` further down, because a scrape has no media and this flag
+    // only exists once the player is loaded. Default off so a freshly created
+    // player never lights the screen on its own.
     p.keepScreenOnWhilePlaying = false;
     // NEVER OUTLIVE THE SCREEN. This app is a video player, not a music player:
     // the episode is expected to stop when the phone is locked, and the config
@@ -1080,23 +1080,8 @@ export default function LandscapePlayer() {
    */
   const { isPlaying: isPlayingEvent } = useEvent(player, 'playingChange', { isPlaying: player.playing });
 
-  // Keep-awake: only while this screen is focused AND the video is playing.
-  // Paused playback (or a backgrounded player) lets the device sleep, and
-  // navigating away no longer leaves the display lit. PiP keeps the screen on
-  // through the OS media session.
-  useFocusEffect(
-    useCallback(() => {
-      focusedRef.current = true;
-      player.keepScreenOnWhilePlaying = playing;
-      return () => {
-        focusedRef.current = false;
-        player.keepScreenOnWhilePlaying = false;
-      };
-    }, [player, playing])
-  );
-  useEffect(() => {
-    if (focusedRef.current) player.keepScreenOnWhilePlaying = playing;
-  }, [player, playing]);
+  // Keep-awake lives near `screenAwake`, next to `stageUp` — it is driven by
+  // "is the viewer waiting on the picture", not by `playing` alone.
 
   /**
    * The health monitor's running state. A ref, not `useState` — it is read,
@@ -3486,6 +3471,27 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const gatheringRef = useRef(false);
   const variantsLoadedRef = useRef(false);
   /**
+   * WHICH SOURCES HAVE ALREADY BEEN ASKED FOR THIS LIST.
+   *
+   * `variantsBySource` cannot tell "not read yet" from "read and failed": a
+   * failed master is stored NOWHERE (the entry stays `undefined`), so every
+   * state-driven retry saw it as a fresh question and asked again. With the
+   * quality sheet open that was an endless loop — the 24 Nov preview build:
+   * one source's master 403s or times out, the gather finishes, `qualityPhase`
+   * flips to `ready`, the open-effect sees that source still `undefined`,
+   * force-reads EVERY source (the playing one too) and flips back to
+   * `loading` — rows visible for a frame, `Loading…` again, the masters
+   * re-fetched every couple of seconds on the connection that was already the
+   * problem. A read is asked ONCE per list now; `force` (an explicit Refresh,
+   * a reconnect) is the only path allowed to re-ask, and a menu open gets at
+   * most one such retry (`sheetRetriedRef`).
+   *
+   * Reset ONLY when a new list lands — see the `sources` effect below.
+   */
+  const gatherTriedRef = useRef<Set<number>>(new Set());
+  /** The quality sheet's one fair re-read per open (see the menu effect). */
+  const sheetRetriedRef = useRef(false);
+  /**
    * "A rung is remembered and the ladders were just re-minted — re-seat it."
    *
    * Set by a token refresh, consumed by the gather that follows. It cannot be
@@ -3504,9 +3510,27 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     if (gatheringRef.current) return;
     const list = sourcesRef.current;
     if (list.length === 0) return;
-    const indexes = (only ?? list.map((_, i) => i)).filter((i) => i >= 0 && i < list.length);
+    const candidates = (only ?? list.map((_, i) => i)).filter(
+      (i) => i >= 0 && i < list.length
+    );
+    if (!candidates.length) return;
+    /**
+     * AUTO MODE ASKS EACH SOURCE ONCE PER LIST.
+     *
+     * A master that timed out, 403'd or was rate-limited will answer the same
+     * way a second later, so re-asking it automatically is pure cost — and it
+     * is exactly what made the sheet's rows flash: the "any source still
+     * undefined" test never stops being true for a dead host, so each finished
+     * gather triggered the next one. Only `force` re-asks (an explicit Refresh
+     * or a reconnect).
+     */
+    const indexes = force
+      ? candidates
+      : candidates.filter(
+          (i) => variantsRef.current[i] === undefined && !gatherTriedRef.current.has(i)
+        );
     if (!indexes.length) return;
-    if (!force && indexes.every((i) => variantsRef.current[i] !== undefined)) return;
+    for (const i of indexes) gatherTriedRef.current.add(i);
     if (isOffline()) {
       setQualityPhase('failed');
       return;
@@ -3534,11 +3558,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       let result = await readSubset(indexes);
       if (attemptId !== gatherAttemptRef.current) return;
 
-      // Retry is now LAZY: a failed read is left failed here, and only
-      // retried when the viewer opens the quality menu (see the menu effect
-      // below, which calls `gatherVariants(true)`). Hammering a dead or slow
-      // host on a background prefetch is exactly what made a bad connection
-      // worse; the menu is the viewer asking "what is actually available".
+      // Retry is LAZY and BOUNDED: a failed read is left failed here, and only
+      // re-asked by an explicit Refresh (or the sheet's one re-read on open —
+      // see the menu effect below). Hammering a dead or slow host on a
+      // background prefetch is exactly what made a bad connection worse; the
+      // menu is the viewer asking "what is actually available".
       const failed = [...result.entries()]
         .filter(([, v]) => v === null)
         .map(([i]) => i);
@@ -3588,6 +3612,18 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   useEffect(() => {
     variantsLoadedRef.current = false;
     gatherAttemptRef.current += 1;
+    // A NEW LIST IS A NEW SET OF QUESTIONS. Every source may be asked once
+    // again, and the sheet's one-shot retry is re-armed with it.
+    gatherTriedRef.current = new Set();
+    sheetRetriedRef.current = false;
+    // THE REF IS CLEARED WITH THE STATE, not a render later. `variantsRef` is
+    // the map `gatherVariants` reads, and during this effect pass it still
+    // holds the REPLACED list's ladders (refs are assigned at render, and the
+    // `setVariantsBySource({})` below commits after this flush). Without this
+    // the eager read for the active source was filtered out as "already
+    // defined" and a token refresh could keep the dead token's ladder until
+    // the menu was opened.
+    variantsRef.current = {};
     setQualityPhase('idle');
     setVariantsBySource({});
     // THE ACTIVE SOURCE ONLY. This used to read every source's master playlist
@@ -3599,27 +3635,54 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   }, [sources, gatherVariants]);
 
   // A hop needs the DESTINATION's ladder — it is what the recovery ladder steps
-  // down into if the new server is also too slow. One read, on arrival.
+  // down into if the new server is also too slow. One read, on arrival. The ref
+  // (not `variantsBySource`) is read so a publish does not re-run this effect:
+  // a failed destination is in `gatherTriedRef`, so it is not asked again.
   useEffect(() => {
     if (sources.length === 0) return;
-    if (variantsBySource[srcIndex] !== undefined) return;
+    if (variantsRef.current[srcIndex] !== undefined) return;
     void gatherVariants(false, [srcIndex]);
-  }, [srcIndex, sources.length, variantsBySource, gatherVariants]);
+  }, [srcIndex, sources, gatherVariants]);
 
-  // Menu open is the viewer asking "what is actually available", so a failed
-  // gather gets another attempt there instead of staying broken until a
-  // reconnect. A successful gather is not re-run: the ladders do not change
-  // while the same episode is open.
+  /**
+   * MENU OPEN READS WHAT HAS NOT BEEN READ — AND RETRIES AT MOST ONCE.
+   *
+   * This effect used to decide from `qualityPhase` and from "any source still
+   * `undefined`", and those are the same trap: a source whose master cannot be
+   * read stays `undefined` forever, so every completed gather flipped the
+   * phase, which re-ran the effect, which gathered again — `Loading…` on the
+   * Auto row, the rows repainting for a frame, and every source's master
+   * re-fetched each pass. The preview build showed it exactly: qualities
+   * appear, half a second later the sheet is loading them again, forever.
+   *
+   * The open is still the viewer asking, so it reads every source not asked
+   * yet and, when the sheet would otherwise have nothing to offer (the active
+   * ladder failed or never landed), spends ONE forced re-read of that ladder.
+   * `sheetRetriedRef` is what keeps "one" from becoming the hammer; `__retryq`
+   * (the Refresh row) is the unbounded path, because that one is a tap.
+   */
   useEffect(() => {
-    if (menu !== 'quality') return;
-    // THE MENU IS WHERE THE REST OF THE LIST IS READ. Its rows are one per
-    // distinct label across every source, so opening it is the moment the full
-    // gather is worth its requests — and it is the viewer asking, not a
-    // background prefetch competing with the segment the player needs.
-    const partial = sourcesRef.current.some((_, i) => variantsRef.current[i] === undefined);
-    if (qualityPhase === 'failed' || partial) void gatherVariants(true);
-    else if (qualityPhase === 'idle') void gatherVariants();
-  }, [menu, qualityPhase, gatherVariants]);
+    if (menu !== 'quality') {
+      sheetRetriedRef.current = false;
+      return;
+    }
+    const active = srcIndexRef.current;
+    const read = sourcesRef.current
+      .map((_, i) => i)
+      .filter(
+        (i) => variantsRef.current[i] === undefined && !gatherTriedRef.current.has(i)
+      );
+    // The ACTIVE ladder is the one the sheet must have: if its first read
+    // failed, the open buys exactly one re-read of it — folded into the same
+    // request as the unread sources, so the two cannot race for `gatheringRef`
+    // and silently drop one. `sheetRetriedRef` bounds it to one per open.
+    const retryActive =
+      variantsRef.current[active] === undefined && !sheetRetriedRef.current;
+    if (retryActive && !read.includes(active)) read.push(active);
+    if (!read.length) return;
+    if (retryActive) sheetRetriedRef.current = true;
+    void gatherVariants(retryActive, read);
+  }, [menu, sources, srcIndex, gatherVariants]);
 
   /**
    * A VIEWER DECISION RESTARTS EVERY AUTOMATIC VERDICT.
@@ -3642,6 +3705,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const onPickQuality = useCallback(
     (key: string) => {
       if (key === '__retryq') {
+        // The viewer's explicit re-read also satisfies the open's one-shot
+        // retry, so the commit that follows does not spend a second one.
+        sheetRetriedRef.current = true;
         void gatherVariants(true);
         return;
       }
@@ -5244,7 +5310,75 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const switching = switchPending && resolving;
   switchingRef.current = switching;
 
-  const stageUp = (!firstFrame || switchPending) && !error && !offline && desiredPlayingRef.current;
+  /**
+   * THE PICTURE IS PROVEN BY EITHER SIGNAL.
+   *
+   * `firstFrame` is the VideoView's `onFirstFrameRender`. `playbackProgress` is
+   * the first `timeUpdate` past half a second, and `timeUpdate` only arrives
+   * while the pipeline is producing frames — the same proof `buffering` below
+   * already trusts.
+   *
+   * The event is NOT guaranteed. A `replaceAsync` that re-prepares the same URL
+   * can arrive with the view's first-frame flag already consumed, and a
+   * remounted `VideoView` (`videoViewRevision`, the frame watchdog's repair)
+   * can miss the render that happened during the swap. When that happens the
+   * episode plays behind a stage that never lifts — the 24 Nov Expo Go report:
+   * "it starts playing behind the scraping UI and the UI stays there". A
+   * moving clock is enough to drop the stage; a stage over a playing episode is
+   * worse than a frame of chrome appearing early.
+   */
+  const pictureUp = firstFrame || playbackProgress;
+  const stageUp = (!pictureUp || switchPending) && !error && !offline && desiredPlayingRef.current;
+
+  /**
+   * SHOULD THE DISPLAY STAY LIT?
+   *
+   * While the episode is PLAYING, and while the player is still working on it:
+   * the scrape / episode switch / first-frame wait (`stageUp`), and a mid-play
+   * rebuffer or stall. Those are the moments the viewer is waiting on us — a
+   * screen that dims or locks there reads as the app having hung, and on
+   * Android the lock can stop the very download being waited on.
+   *
+   * A PAUSED ITEM IS DELIBERATELY NOT AWAKE. Pausing is the viewer's decision,
+   * so the system's inactivity timeout applies again (the old rule, kept).
+   * The `health` terms cannot outlive a pause: the tick reports `inactive`
+   * once the intent is false, which resets the state to `unknown` within a
+   * second.
+   */
+  const screenAwake =
+    playing ||
+    stageUp ||
+    health.kind === 'rebuffering' ||
+    health.kind === 'stalled';
+
+  /**
+   * Keep-awake is driven HERE, by the state above — not by `playing` alone.
+   *
+   * `player.keepScreenOnWhilePlaying` is the mechanism (the VideoView's
+   * `keepScreenOn`), because the player is what is on screen. Its native side
+   * RELEASES the lock on every `onIsPlayingChanged(false)` — including the
+   * pause an episode switch performs while the next item is still scraping —
+   * so `playing` stays in the effect's dependencies: when that release
+   * happens, the effect re-runs and asks again. That is exactly the scrape
+   * window this exists for.
+   *
+   * Only while THIS screen is focused: it can stay mounted in the navigation
+   * stack, and a player left behind must not light the display on
+   * home/details. PiP keeps the screen on through the OS media session.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      focusedRef.current = true;
+      player.keepScreenOnWhilePlaying = screenAwake;
+      return () => {
+        focusedRef.current = false;
+        player.keepScreenOnWhilePlaying = false;
+      };
+    }, [player, screenAwake])
+  );
+  useEffect(() => {
+    if (focusedRef.current) player.keepScreenOnWhilePlaying = screenAwake;
+  }, [player, screenAwake, playing]);
 
   /**
    * ONE LAYER AT A TIME — the stage REPLACES the controls; it does not sit

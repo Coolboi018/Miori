@@ -61,6 +61,11 @@ const read = (rel: string) => readFileSync(`${ROOT}/${rel}`, 'utf8');
 
 const chromeSrc = read('components/player/fullscreen/Chrome.tsx');
 const screenSrc = read('components/player/fullscreen/PlayerScreen.tsx');
+// The scrim and the floating skip button moved to their own module on 24 Nov;
+// the mount conditions they own are still rules, so they are read where they
+// actually live now — the same way `check-player-health` reads `PlayerCards`.
+const overlaysSrc = read('components/player/fullscreen/PlayerOverlays.tsx');
+const menuRowsSrc = read('components/player/fullscreen/usePlayerMenuRows.ts');
 const menuSrc = read('components/player/fullscreen/Menu.tsx');
 const panelSrc = read('components/player/fullscreen/SettingsPanel.tsx');
 const subSrc = read('components/player/SubtitleOverlay.tsx');
@@ -153,7 +158,7 @@ check(
 // is really a check that pins "nobody may ever add a term", which is not the
 // rule anyone meant. So: assert the TERMS — the three conditions that must be
 // consulted — and separately pin the new one.
-const bottomBarDecl = /const bottomBarUp =([^;]+);/.exec(screenSrc)?.[1] ?? '';
+const bottomBarDecl = /const bottomBarUp =([^;]+);/.exec(overlaysSrc)?.[1] ?? '';
 check(
   'the bottom bar stays mounted while a menu is open',
   bottomBarDecl.length > 0 &&
@@ -452,7 +457,7 @@ console.log('\nchrome layout — the settings panel');
   // so must the registry, or two probes produce the duplicate in the first place.
   check(
     'the source picker keeps one row per provider (a duplicate key errors the panel)',
-    /seenFailed\.has\(f\.id\)/.test(screenSrc) && /seenFailed\.add\(f\.id\)/.test(screenSrc),
+    /seenFailed\.has\(f\.id\)/.test(menuRowsSrc) && /seenFailed\.add\(f\.id\)/.test(menuRowsSrc),
     'failed-source rows are pushed without a per-provider guard'
   );
   const registrySrc = read('lib/extensions/registry.ts');

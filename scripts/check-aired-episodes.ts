@@ -433,6 +433,11 @@ function main() {
     ),
     'the countdown can fire with nothing ahead of the viewer'
   );
+  check(
+    'a locked frame cannot advance the episode',
+    /number=\{locked \? null : upNext\}/.test(player),
+    'a pocket tap on "Play now" would change the episode with no viewer present'
+  );
 
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');
   process.exit(failures ? 1 : 0);

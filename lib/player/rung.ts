@@ -42,6 +42,26 @@ export function masterHasSeparateAudio(text: string): boolean {
 }
 
 /**
+ * The rungs a viewer may pick, out of everything a master declared.
+ *
+ * A `#EXT-X-STREAM-INF` with no `RESOLUTION` is not a picture size. It is an
+ * audio-only rendition published as a variant (a shape real CDNs ship), or a
+ * bandwidth-only entry — and offering it as a quality row gives the viewer a
+ * pick that plays a silent/blank picture. On a separate-audio master it fails a
+ * second way: `capFor` has nothing to pin, so the pick applies nothing and the
+ * item re-opens onto the same master, which reads as a dead button.
+ *
+ * When the master declares a height for at least one rung, the heightless ones
+ * are dropped. A master that declares NONE (the extension-less Bingr/Katana
+ * ladder) keeps them all: there the label is the only identity a rung has, and
+ * dropping everything would empty the sheet for a working adaptive stream.
+ */
+export function selectableRungs<T extends RungLike>(variants: T[]): T[] {
+  const withHeight = variants.filter((v) => v.height != null);
+  return withHeight.length ? withHeight : variants;
+}
+
+/**
  * The `maxResolution` that pins a rung WITHOUT re-opening the stream.
  *
  * `null` when the variant has no height: some masters label a rung with

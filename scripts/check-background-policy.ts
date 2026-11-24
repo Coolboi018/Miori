@@ -82,6 +82,19 @@ check('auto PiP never for a paused episode', shouldAutoEnterPip(true, false) ===
 check('auto PiP never on an unsupported device', shouldAutoEnterPip(false, true) === false);
 check('the handoff window is short but not zero', PIP_HANDOFF_GRACE_MS >= 300 && PIP_HANDOFF_GRACE_MS <= 3000);
 
+// The up-next countdown is a timer that CHANGES THE EPISODE, so it is held to
+// the same rule as playback: time spent away from the app is not time spent
+// deciding. Android throttles background timers and then delivers them in a
+// burst, which advances the queue the moment the viewer comes back.
+{
+  const card = read('components/player/fullscreen/NextEpisodeCard.tsx');
+  check(
+    'the up-next countdown does not tick while the app is away',
+    /AppState\.currentState !== 'active'\) return;/.test(card),
+    'a backgrounded countdown fires late, or on return, against a playhead that is no longer at the end'
+  );
+}
+
 // The naive rule this app must NOT implement: every background is a pause.
 const naiveHold = (appActive: boolean) => !appActive;
 check(

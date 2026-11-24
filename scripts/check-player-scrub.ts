@@ -392,12 +392,15 @@ console.log('\nthe commit seek lands at the widened tolerance');
 console.log('\nthe bar cannot be pulled out from under a finger');
 {
   const screen = code('components/player/fullscreen/PlayerScreen.tsx');
+  // The expression lives in `PlayerOverlays.tsx` since the 24 Nov split: it is
+  // the scrim's and the skip button's mount condition, not the screen's.
+  const overlays = code('components/player/fullscreen/PlayerOverlays.tsx');
   const bar = code('components/player/fullscreen/ProgressBar.tsx');
 
   check(
     'the bar is mounted while a drag is live, regardless of the chrome',
     /bottomBarUp\s*=\s*\(\s*visible\s*&&\s*!locked\s*&&\s*!panelOpen\s*\)\s*\|\|\s*scrubActive/.test(
-      screen
+      overlays
     ),
     'the chrome auto-hides after 3s and ProgressBar lives inside it — a drag longer than that used to issue no seek at all'
   );

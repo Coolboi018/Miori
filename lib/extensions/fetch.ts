@@ -71,6 +71,32 @@ export async function fetchTimed(
   }
 }
 
+/**
+ * One request, status only, body never read.
+ *
+ * For probes. `fetchTimed` drains the body on purpose — every caller needs it —
+ * and for a MEDIA file that drain is the file. HEAD has no body to drain, so
+ * "is this served" costs headers and nothing else.
+ */
+export async function fetchHead(
+  url: string,
+  ms: number,
+  headers: Record<string, string> | undefined,
+  label = 'Request'
+): Promise<{ ok: boolean; status: number }> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { method: 'HEAD', headers, signal: ctrl.signal });
+    return { ok: res.ok, status: res.status };
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new Error(`${label} timed out after ${ms}ms`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /** `fetchTimed` plus the `!res.ok` throw, for callers that want the body. */
 export async function fetchText(
   url: string,
@@ -212,6 +238,25 @@ export async function probeSource(
   ms = 8000
 ): Promise<ProbeResult> {
   if (container !== 'hls') {
+    /**
+     * HEAD FIRST, BECAUSE THE RANGED GET WAS DOWNLOADING THE EPISODE.
+     *
+     * React Native's `fetch` settles only once the body has arrived, so the old
+     * `Range: bytes=0-1` probe was cheap only when the CDN honoured the range.
+     * One that ignores it answers 200 with the WHOLE FILE, and the probe then
+     * pulled the video through the radio — tens of megabytes inside an 8s
+     * deadline, on the connection the resolve is already waiting on, to learn a
+     * fact the status line had stated. A HEAD response has no body at all.
+     */
+    try {
+      const head = await fetchHead(url, ms, headers, 'mp4 probe');
+      if (head.ok) return { alive: true, video: true };
+      // 405/501 mean "this host has no HEAD", which says nothing about the
+      // file. Any other non-2xx is the verdict the ranged GET used to give.
+      if (head.status !== 405 && head.status !== 501) return { alive: false, video: false };
+    } catch {
+      /* HEAD is not universal — the ranged GET below is the fallback */
+    }
     // Range request: 2 bytes is enough for a verdict and keeps CDN egress at
     // noise level. A 206/200 with any body means the file is being served.
     try {

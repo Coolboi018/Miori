@@ -47,14 +47,42 @@ function parseTimestamp(t: string): number | null {
   return h * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10) + ms / 1000;
 }
 
+/** A decoded entity, or nothing for a code point that cannot be rendered. */
+function safeChar(code: number): string {
+  return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+}
+
 function cleanText(s: string): string {
   return (
     s
+      /**
+       * A LINE BREAK INSIDE A CUE IS A LINE BREAK.
+       *
+       * Converted ASS/SSA tracks carry `<br>` for a second line, and the tag
+       * stripper below used to erase it like any other tag — welding `first` and
+       * `second` into `firstsecond` in the middle of a sentence. Every tag rule
+       * on the next line still applies; this one runs first, so the break
+       * survives as a newline the frame builder can stack.
+       */
+      .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]*>/g, '') // <i>, <ruby><rt>, <v voice> etc.
       .replace(/\{[^}]*\}/g, '')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
+      /**
+       * ENTITIES, NUMERIC FIRST AND `&amp;` LAST.
+       *
+       * A provider track writes `&#39;` for an apostrophe and `&amp;` for an
+       * ampersand; left encoded, the viewer reads the code. `&amp;` has to be
+       * decoded LAST or `&amp;lt;` would be decoded twice into `<` — the same
+       * double-decode every naive HTML unescaper has.
+       */
+      .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => safeChar(parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d: string) => safeChar(parseInt(d, 10)))
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&amp;/gi, '&')
       .trim()
   );
 }

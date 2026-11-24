@@ -204,6 +204,40 @@ check(
 );
 
 // ===========================================================================
+// 0b. The TEXT inside a cue is decoded, not passed through
+// ===========================================================================
+//
+// Converted ASS/SSA tracks carry `<br>` for the second line, and provider
+// tracks write `&#39;` / `&amp;` for punctuation. Both used to reach the screen
+// verbatim (a welded word, or the literal `&#39;`), because the tag stripper
+// removed `<br>` like any other tag and nothing decoded entities at all.
+{
+  const br = parseVTT(
+    ['WEBVTT', '', '00:00:01.000 --> 00:00:03.000', 'first<br>second', ''].join('\n')
+  );
+  check(
+    'a <br> inside a cue becomes a line break, not a welded word',
+    br.length === 1 && br[0].text === 'first\nsecond',
+    JSON.stringify(br[0]?.text)
+  );
+
+  const ent = parseVTT(
+    [
+      'WEBVTT',
+      '',
+      '00:00:01.000 --> 00:00:03.000',
+      'Tom &amp; Jerry&#39;s &quot;show&quot;&nbsp;!',
+      '',
+    ].join('\n')
+  );
+  check(
+    'entities are decoded once, with &amp; last',
+    ent.length === 1 && ent[0].text === 'Tom & Jerry\'s "show" !',
+    JSON.stringify(ent[0]?.text)
+  );
+}
+
+// ===========================================================================
 // 1b. The sync offset shifts the LOOKUP, never the cues
 // ===========================================================================
 //

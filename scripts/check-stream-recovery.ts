@@ -40,13 +40,11 @@ import {
   labelDisagrees,
   paramNumber,
 } from '../lib/player/source';
-import { capFor, masterHasSeparateAudio } from '../lib/player/rung';
+import { capFor, masterHasSeparateAudio, selectableRungs } from '../lib/player/rung';
 import {
-  CAP_HEIGHTS,
   decideRecovery,
   DOWNLOADING_PATIENCE_MS,
   initialRecovery,
-  MAX_QUALITY_DROPS,
   noteRecovered,
   noteStable,
   RECOVERY_COOLDOWN_MS,
@@ -78,8 +76,8 @@ function section(title: string): void {
 }
 
 /** A stall on a stream that is downloading nothing. */
-function stuck(nextRung: number | null, hasLadder = true): StallEvidence {
-  return { ahead: 0, frozenMs: 20_000, growing: false, hasLadder, nextRung };
+function stuck(): StallEvidence {
+  return { ahead: 0, frozenMs: 20_000, growing: false };
 }
 
 /** Advance the clock past the cooldown so the next decision is allowed to act. */
@@ -162,13 +160,7 @@ section('1. the failover budget survives the wrap-load (the endless loop)');
 section('2. slow is not dead: wait while the buffer is still filling');
 
 {
-  const ev: StallEvidence = {
-    ahead: 0.5,
-    frozenMs: 16_000,
-    growing: true,
-    hasLadder: true,
-    nextRung: 1,
-  };
+  const ev: StallEvidence = { ahead: 0.5, frozenMs: 16_000, growing: true };
   const slow = decideRecovery(initialRecovery(), ev, 20_000);
 
   check('a frozen picture whose buffer is still growing WAITS', slow.action.kind, 'wait');
@@ -178,14 +170,14 @@ section('2. slow is not dead: wait while the buffer is still filling');
   // MUTATION: the same stall with no growth is acted on immediately. If this
   // were identical to the case above, `growing` would be doing nothing.
   const dead = decideRecovery(initialRecovery(), { ...ev, growing: false }, 20_000);
-  check('MUTATION — the SAME stalled picture with no growth is acted on', dead.action.kind, 'lower-quality');
+  check('MUTATION — the SAME stalled picture with no growth is acted on', dead.action.kind, 'reload');
 
   const impatient = decideRecovery(
     initialRecovery(),
     { ...ev, frozenMs: DOWNLOADING_PATIENCE_MS + 1_000 },
     20_000
   );
-  check('…but a buffer that never finishes filling is answered', impatient.action.kind, 'lower-quality');
+  check('…but a buffer that never finishes filling is answered', impatient.action.kind, 'reload');
 }
 
 // ---------------------------------------------------------------------------
@@ -194,71 +186,79 @@ section('2. slow is not dead: wait while the buffer is still filling');
 section('3. the cooldown: one remedy per result, not one per tick');
 
 {
-  const first = decideRecovery(initialRecovery(), stuck(1), 100_000);
-  check('the first stall steps down one rung', first.action.kind, 'lower-quality');
-  check('…to the rung it was given', first.action.kind === 'lower-quality' ? first.action.to : null, 1);
+  const first = decideRecovery(initialRecovery(), stuck(), 100_000);
+  check('the first stall re-opens in place', first.action.kind, 'reload');
+  check('…and carries no quality in it', 'to' in first.action || 'height' in first.action, false);
 
-  const again = decideRecovery(first.state, stuck(1), 100_000 + RECOVERY_COOLDOWN_MS - 1);
+  const again = decideRecovery(first.state, stuck(), 100_000 + RECOVERY_COOLDOWN_MS - 1);
   check('a second remedy inside the cooldown waits', again.action.kind, 'wait');
   check('…and does not spend', again.state.actions, first.state.actions);
 
-  const allowed = decideRecovery(first.state, stuck(2), 100_000 + RECOVERY_COOLDOWN_MS);
-  check('after the cooldown it acts again', allowed.action.kind, 'lower-quality');
+  const allowed = decideRecovery(first.state, stuck(), 100_000 + RECOVERY_COOLDOWN_MS);
+  check('after the cooldown the next rung of the ladder is a server', allowed.action.kind, 'failover');
 }
 
 // ---------------------------------------------------------------------------
 // 4. The whole ladder, in order
 // ---------------------------------------------------------------------------
-section('4. bitrate first, then a soft reload, then another server');
+section('4. one in-place repair, then another server — never a different quality');
 
 {
   let state = initialRecovery();
   const actions: string[] = [];
-  for (const nextRung of [1, 2, 3, null]) {
-    const decision = decideRecovery(state, stuck(nextRung), later(state));
+  for (let i = 0; i < 3; i++) {
+    const decision = decideRecovery(state, stuck(), later(state));
     state = decision.state;
     actions.push(decision.action.kind);
   }
-  check('a ladder is stepped down twice, then reloaded, then swapped', actions, [
-    'lower-quality',
-    'lower-quality',
+  check('a dead stream is reloaded once, then handed to another server', actions, [
     'reload',
     'failover',
+    'failover',
   ]);
-  check('…never more than MAX_QUALITY_DROPS reductions', state.qualityDrops, MAX_QUALITY_DROPS);
-  check('…and the hop is LAST, so the buffer is only lost once quality failed', actions[actions.length - 1], 'failover');
+  check('…starting with the cheap in-place repair', actions[0], 'reload');
 }
 
 {
+  /**
+   * THE 24 NOV REPORT, AS A CLOSED INVARIANT.
+   *
+   * The ladder used to answer a starved buffer by stepping DOWN the variant
+   * ladder (`lower-quality`) and by capping the ABR track (`cap`) — the "I had
+   * 720p and it came back as 360p" report. Neither may exist again: every remedy
+   * must keep the request identical (same URL, same rung, same audio) and only
+   * the SERVER may change. Driven over every evidence shape the screen can hand
+   * it, including the ones that used to win a reduction.
+   */
+  const kinds = new Set<string>();
   let state = initialRecovery();
-  const actions: string[] = [];
-  for (let i = 0; i < 4; i++) {
-    const decision = decideRecovery(state, stuck(null, false), later(state));
-    state = decision.state;
-    actions.push(decision.action.kind);
+  const shapes: StallEvidence[] = [
+    { ahead: null, frozenMs: 0, growing: true },
+    { ahead: 0, frozenMs: 20_000, growing: false },
+    { ahead: 30, frozenMs: 60_000, growing: true },
+    { ahead: 12, frozenMs: DOWNLOADING_PATIENCE_MS + 1_000, growing: true },
+  ];
+  for (const ev of shapes) {
+    for (let i = 0; i < 8; i++) {
+      const d = decideRecovery(state, ev, later(state, RECOVERY_COOLDOWN_MS));
+      kinds.add(d.action.kind);
+      state = d.state;
+    }
   }
-  check('no ladder at all: the ABR ceiling is applied before a reload', actions, [
-    'cap',
-    'cap',
-    'reload',
+  check('every action the ladder can still take is quality-neutral', [...kinds].sort(), [
     'failover',
+    'reload',
+    'wait',
   ]);
-  check('…and the ceilings step DOWN', CAP_HEIGHTS[0] > CAP_HEIGHTS[1], true);
 }
 
 // ---------------------------------------------------------------------------
 // 5. What a recovered frame does to the ladder
 // ---------------------------------------------------------------------------
-section('5. a frame ends the stretch but keeps the reductions');
+section('5. a frame ends the stretch but keeps the reload it spent');
 
 {
-  const spent: RecoveryState = {
-    actions: 4,
-    qualityDrops: 2,
-    caps: 0,
-    reloads: 1,
-    lastActionAt: 5_000,
-  };
+  const spent: RecoveryState = { actions: 4, reloads: 1, lastActionAt: 5_000 };
   const revived = noteRecovered(spent);
   check('a rendered frame restarts the remedy budget', [revived.actions, revived.lastActionAt], [0, 0]);
   check(
@@ -266,28 +266,19 @@ section('5. a frame ends the stretch but keeps the reductions');
     revived.reloads,
     spent.reloads
   );
-  check(
-    '…but KEEPS the reduction that earned it',
-    [revived.qualityDrops, revived.caps],
-    [spent.qualityDrops, spent.caps]
-  );
-
   // THE 24 NOV FREEZE. `noteRecovered` used to zero `reloads` too, so a source
   // that rendered a frame and died could reload every eight seconds forever.
   // Each of those re-opens `prepare()`s the native source on the Android MAIN
   // thread, behind the disk cache's lock — which a stuck segment holds.
-  // Both states have already spent every ceiling, so the only remedy left on the
-  // no-ladder path is the soft reload — which is the one being counted here.
-  const spentCeilings = { caps: CAP_HEIGHTS.length, lastActionAt: 0 };
-  const oldShapeReloads = { ...spent, ...spentCeilings, reloads: 0 };
+  const oldShapeReloads = { ...spent, reloads: 0 };
   check(
     'the OLD shape (a frame clears the reload) can reload without end — WRONG, watched failing',
-    decideRecovery(oldShapeReloads, stuck(null, false), 20_000).action.kind,
+    decideRecovery(oldShapeReloads, stuck(), 20_000).action.kind,
     'reload'
   );
   check(
     'the real rule: after one reload the ladder moves on to another server',
-    decideRecovery({ ...revived, ...spentCeilings }, stuck(null, false), 20_000).action.kind,
+    decideRecovery(revived, stuck(), 20_000).action.kind,
     'failover'
   );
 
@@ -297,16 +288,11 @@ section('5. a frame ends the stretch but keeps the reductions');
     [stable.actions, stable.reloads, stable.lastActionAt],
     [0, 0, 0]
   );
-  check(
-    '…and still keeps the reduction the connection earned',
-    [stable.qualityDrops, stable.caps],
-    [spent.qualityDrops, spent.caps]
-  );
-  check(
-    'a new episode starts over',
-    initialRecovery(),
-    { actions: 0, qualityDrops: 0, caps: 0, reloads: 0, lastActionAt: 0 }
-  );
+  check('a new episode starts over', initialRecovery(), {
+    actions: 0,
+    reloads: 0,
+    lastActionAt: 0,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -345,15 +331,21 @@ verify(
   /resolving \|\| seekPending \|\| recovering \|\|/.test(screen),
   'a hop leaves the screen with no source: that window must not be a silent frozen frame'
 );
+/** The ladder module's own source, for the invariant below. */
+const recoverySrc = readFileSync(`${ROOT}/lib/player/recovery.ts`, 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^[ \t]*\/\/.*$/gm, '');
 verify(
-  'the ladder can reduce the bitrate',
-  /player\.maxResolution = \{/.test(screen),
-  'without an ABR ceiling a stream whose ladder could not be read has no way to ask for less'
+  'the ladder has NO quality action left (24 Nov: 720p came back as 360p)',
+  !/kind: '(?:lower-quality|cap)'/.test(recoverySrc) &&
+    !/qualityDrops/.test(recoverySrc) &&
+    !/lower-quality/.test(screen),
+  'a hiccup is not consent to lower the rung the viewer picked; the picker is the only lever'
 );
 verify(
-  'an automatic rung is never written to disk',
-  /!autoQualityRef\.current/.test(screen),
-  'a minute on a slow train must not become the permanent quality of the series'
+  'a re-open refuses the cache while a stall is recent',
+  /!stallRecent/.test(screen),
+  'the cache lock is held by the stalled download, and preparing behind it blocks the UI thread'
 );
 verify(
   'only the ACTIVE source is gathered eagerly',
@@ -465,6 +457,21 @@ section('8. separate audio + the ABR ceiling');
   );
   check('no height → NO cap, never a 0-pixel ceiling', capFor({}), null);
 
+  // A `#EXT-X-STREAM-INF` with no RESOLUTION is not a picture size: it is an
+  // audio-only rendition published as a variant, or a bandwidth-only entry.
+  // Offering it gives a pick that plays a silent picture, and with no height
+  // `capFor` cannot even apply it as a ceiling — the pick does nothing.
+  check(
+    'a heightless variant is not offered while the master declares heights',
+    selectableRungs([{ height: 1080 }, { height: 720 }, {}]).length,
+    2
+  );
+  check(
+    'a master with no declared heights keeps its bandwidth-only rungs',
+    selectableRungs([{}, {}, {}]).length,
+    3
+  );
+
   // The wiring, asserted statically: the pure rules are only worth anything if
   // the screen actually consults them. `screen` is the comment-stripped copy
   // section 6 already read.
@@ -474,11 +481,26 @@ section('8. separate audio + the ABR ceiling');
       /const variantUrl = picked && !separateAudio/.test(screen),
     'Katana: video, no sound, no error'
   );
+  /**
+   * THE CEILING IS A PICK'S BUSINESS NOW (24 Nov).
+   *
+   * A separate-audio master is still never played as a bare variant URL (the
+   * silent picture), so a picked rung is applied as `maxResolution` instead. What
+   * changed is WHO may apply it: the ladder used to step such a master down by
+   * ceiling on its own, which is the same unwanted quality decision in a costume
+   * that costs no buffer. The recovery callback must not touch the rung at all.
+   */
+  const recoverBlock =
+    /const recoverStream = useCallback[\s\S]*?recoverStreamRef\.current = recoverStream/.exec(screen)?.[0] ?? '';
   verify(
-    'the ladder steps such a master down by CEILING, not by URL swap',
-    /if \(ladder && ladder\[0\]\?\.separateAudio === true\)/.test(screen) &&
-      /player\.maxResolution = capFor\(ladder\[to\]\)/.test(screen),
-    'a swap both mutes the picture and throws away the buffer'
+    'a picked rung on a separate-audio master is applied as a ceiling',
+    /player\.maxResolution = separateAudio \? capFor\(picked\) : null/.test(screen),
+    'a variant swap both mutes the picture and throws away the buffer'
+  );
+  verify(
+    'the recovery path never touches quality or the ABR ceiling (24 Nov report)',
+    recoverBlock.length > 0 && !/maxResolution|qualitySelRef|setQualitySel|capFor/.test(recoverBlock),
+    'that is how 720p came back as 360p: a hiccup must not change the rung the viewer picked'
   );
   verify(
     'a silent picture is a failure with its own sentence',
@@ -521,6 +543,6 @@ section('8. separate audio + the ABR ceiling');
 console.log(
   fail
     ? `\n${fail} failed, ${pass} passed\n`
-    : `\nall ${pass} passed — a slow link is waited out, then asked for less bitrate, then\nreloaded in place, and only then moved to another server. The walk can now\nactually run out of rounds, so it terminates.\n`
+    : `\nall ${pass} passed — a slow link is waited out, then reloaded in place ONCE at\nthe same quality, and only then moved to another server. The quality is never\ntouched by the ladder, and the walk can run out of rounds, so it terminates.\n`
 );
 process.exit(fail ? 1 : 0);

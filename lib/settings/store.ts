@@ -186,16 +186,34 @@ export type PlayerAudioMixingKey = (typeof PLAYER_AUDIO_MIXING)[number]['key'];
  * never handed to `setVideoCacheSizeAsync` (zero is not a size, and the native
  * call would reject); the setting screens branch on the key instead.
  */
+/**
+ * ⚠️ `off` IS THE DEFAULT (24 Nov), and that is a correctness decision, not a
+ * storage one.
+ *
+ * The 24 Nov device report — a spinner that froze and then an app that closed
+ * itself — traced to `expo-video` preparing a cached source on the Android MAIN
+ * thread (`VideoModule.replaceImpl` → `appContext.mainQueue`), where
+ * `CacheVariantIndex.storageKeyResult` takes a `@Synchronized` lock and reads a
+ * file. The cache's network interceptor holds that same lock for every response,
+ * so a single stalled segment download is enough to block the UI thread for as
+ * long as it stalls. Encoding a download that never finishes into an ANR is not
+ * a memory tradeoff a viewer can reason about, so the safe path is the default:
+ * no disk cache, and every open goes straight to the network.
+ *
+ * The sizes stay for anyone who wants them back and has the headroom; the player
+ * also refuses the cache for two minutes after any stall, so choosing Normal is
+ * no longer choosing the freeze.
+ */
 export const PLAYER_CACHES = [
-  { key: 'low', label: 'Low', hint: '64 MB cache limit', bytes: 64 * 1024 * 1024 },
-  { key: 'balanced', label: 'Normal', hint: '192 MB cache limit (default)', bytes: 192 * 1024 * 1024 },
-  { key: 'high', label: 'High', hint: '384 MB cache limit', bytes: 384 * 1024 * 1024 },
   {
     key: 'off',
     label: 'Off',
-    hint: 'Nothing kept on this device; rewinds may reload from the source',
+    hint: 'Default. Nothing kept on this device; the most stable on weak connections',
     bytes: 0,
   },
+  { key: 'low', label: 'Low', hint: '64 MB cache limit', bytes: 64 * 1024 * 1024 },
+  { key: 'balanced', label: 'Normal', hint: '192 MB cache limit', bytes: 192 * 1024 * 1024 },
+  { key: 'high', label: 'High', hint: '384 MB cache limit', bytes: 384 * 1024 * 1024 },
 ] as const;
 export type PlayerCacheKey = (typeof PLAYER_CACHES)[number]['key'];
 
@@ -639,7 +657,9 @@ export const DEFAULTS: SettingsSchema = {
   'player.preservesPitch': true,
   'player.autoSkipIntro': true,
   'player.autoSkipOutro': false,
-  'player.cache': 'balanced',
+  // Off by default — see `PLAYER_CACHES`. The disk cache is a native lock on the
+  // path every source open takes, and that lock is the freeze.
+  'player.cache': 'off',
   'player.swipeSides': 'brightness-left',
   'player.defaultSource': 'auto',
   'player.defaultSourceMigrated': false,

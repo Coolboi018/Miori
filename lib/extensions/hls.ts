@@ -13,7 +13,7 @@
 // 23 Nov, which appeared the moment the app started stepping down a ladder
 // automatically. `separateAudio` is what tells the player to pin the rung with
 // `maxResolution` instead of swapping the URL.
-import { masterHasSeparateAudio } from '../player/rung';
+import { masterHasSeparateAudio, selectableRungs } from '../player/rung';
 import { fetchText } from './fetch';
 
 export interface HlsVariant {
@@ -68,9 +68,27 @@ export async function listVariants(
       /* skip */
     }
   }
+  /**
+   * ONLY RUNGS A VIEWER CAN ACTUALLY SEE.
+   *
+   * A `#EXT-X-STREAM-INF` with no `RESOLUTION` is not a picture size — it is an
+   * audio-only rendition published as a variant (a real CDN shape), or a
+   * bandwidth-only entry. Offering it as `1234k` gives the viewer a row that
+   * plays a silent/blank picture, and on a separate-audio master it is worse
+   * than that: `capFor` has no height to pin, so the pick applies nothing and
+   * the stream re-opens onto the same master, looking like a dead button.
+   *
+   * When at least one rung declares a height, the heightless entries are
+   * dropped. A master that declares NONE of them (the extension-less Bingr /
+   * Katana ladder) keeps them all: there the label is the only identity a rung
+   * has, and dropping everything would leave the quality sheet empty for a
+   * perfectly adaptive stream.
+   */
+  const selectable = selectableRungs(out);
+
   // Dedupe by label, highest bandwidth wins, sort high -> low.
   const seen = new Map<string, HlsVariant>();
-  for (const v of out) {
+  for (const v of selectable) {
     const prev = seen.get(v.label);
     if (!prev || v.bandwidth > prev.bandwidth) seen.set(v.label, v);
   }

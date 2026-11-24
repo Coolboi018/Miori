@@ -38,15 +38,33 @@
 //   1. WAIT      — bytes are still arriving. A buffer that is filling slowly is
 //                  a buffer that is filling; acting here throws away progress.
 //                  This is the single most important rule for "slow internet".
-//   2. LESS BITRATE — step DOWN one rung on the current source's own ladder.
-//                  Same server, same position, one third of the bandwidth.
-//                  Falls back to the ABR ceiling (`maxResolution`) when the
-//                  ladder could not be read at all.
-//   3. RELOAD    — one soft re-open of the same URL at the same position. This
-//                  recovers a wedged pipeline (a decoder that stopped pulling)
-//                  without changing server.
-//   4. FAILOVER  — another source. Last, because it is the most expensive
-//                  remedy and the only one that loses the buffer.
+//   2. RELOAD    — one soft re-open of the same URL, same position, SAME
+//                  QUALITY. This recovers a wedged pipeline (a decoder that
+//                  stopped pulling) without changing server or bitrate.
+//   3. FAILOVER  — another source at the SAME quality. Last, because it is the
+//                  most expensive remedy and the only one that loses the buffer.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// ⚠️ THE VIEWER'S QUALITY IS NOT OURS TO CHANGE (24 Nov report)
+//
+// This ladder used to answer a starved buffer by stepping DOWN the variant
+// ladder (`lower-quality`) and, when no ladder was readable, by lowering the
+// ABR ceiling (`cap`). The device report says exactly why that is wrong:
+//
+//   "it started loading spinner, then it reloaded and I found it reloaded and
+//    started 360p, I had 720p before … we don't want to decrease the quality
+//    automatically … I had selected 720p so stay 720p, it should show spinner
+//    and load ahead after it gets the internet again"
+//
+// Every one of those steps was a RE-OPEN on a connection that had nothing to
+// spare, and each one also silently rewrote a choice the viewer had made by
+// hand. Waiting plus one in-place repair is what a real player does: a hiccup is
+// a hiccup, and the stream that was asked for is the stream that resumes.
+//
+// The remedies that remain therefore change NOTHING about the request: same
+// URL, same rung, same source-then-next-source. The single lever for a
+// connection that genuinely cannot carry the chosen rung is the viewer's own —
+// the picker — and `RECOVERY_EXHAUSTED_MESSAGE` is what points at it.
 //
 // NO IMPORTS, deliberately — same rule as `health.ts`, `speed.ts` and
 // `tapArbiter.ts`: pure logic lives where a Node script can load it.
@@ -54,22 +72,14 @@
 export type RecoveryAction =
   /** Do nothing but keep the ring up. */
   | { kind: 'wait'; because: 'cooldown' | 'downloading' }
-  /** Lock the ladder's next-lower variant on the SAME source. */
-  | { kind: 'lower-quality'; to: number }
-  /** No ladder: cap the adaptive ceiling so the player picks a smaller track. */
-  | { kind: 'cap'; height: number }
-  /** Re-open the same source, same position. */
+  /** Re-open the same source, same position, same quality. */
   | { kind: 'reload' }
-  /** Step to the next source in the walk. */
+  /** Step to the next source in the walk, at the same quality. */
   | { kind: 'failover' };
 
 export interface RecoveryState {
   /** Remedies carried out since the last rendered frame. Diagnostic + message. */
   actions: number;
-  /** Bitrate steps taken. Kept across recoveries — see `noteRecovered`. */
-  qualityDrops: number;
-  /** ABR ceilings applied. */
-  caps: number;
   /** In-place reloads tried since the last frame. */
   reloads: number;
   /** When the last remedy ran, ms. 0 = none yet. */
@@ -99,12 +109,6 @@ export const RECOVERY_COOLDOWN_MS = 8_000;
  */
 export const DOWNLOADING_PATIENCE_MS = 45_000;
 
-/** At most two bitrate steps per episode: 1080 → 720 → 480 is already drastic. */
-export const MAX_QUALITY_DROPS = 2;
-
-/** ABR ceilings, in the order they are applied when no ladder is readable. */
-export const CAP_HEIGHTS: readonly number[] = [720, 480];
-
 /**
  * What the error card says when the walk ends after the ladder was used.
  *
@@ -118,7 +122,7 @@ export const RECOVERY_EXHAUSTED_MESSAGE =
 
 /** A fresh ladder for a new episode. */
 export function initialRecovery(): RecoveryState {
-  return { actions: 0, qualityDrops: 0, caps: 0, reloads: 0, lastActionAt: 0 };
+  return { actions: 0, reloads: 0, lastActionAt: 0 };
 }
 
 /**
@@ -138,10 +142,7 @@ export function initialRecovery(): RecoveryState {
  * also what the code does. `noteStable` is where the budget comes back.
  *
  * `actions` and the cooldown still restart, because the next stall is a NEW
- * event whose cheap remedies deserve to be weighed again. `qualityDrops` and
- * `caps` deliberately do NOT reset: the reduction is why the frame landed, and
- * re-offering the rung that starved would make the player oscillate every
- * fifteen seconds on exactly the connection least able to absorb a replace.
+ * event whose cheap remedies deserve to be weighed again.
  */
 export function noteRecovered(state: RecoveryState): RecoveryState {
   return { ...state, actions: 0, lastActionAt: 0 };
@@ -156,8 +157,6 @@ export function noteRecovered(state: RecoveryState): RecoveryState {
  * and ten quiet minutes later a second hiccup earns another. A broken source
  * never gets here, so the loop above cannot restart.
  *
- * `qualityDrops`/`caps` still survive: they describe this connection, and a
- * successful quiet minute at 480p is not evidence that 1080p would have worked.
  * A new EPISODE still starts completely over (`initialRecovery`).
  */
 export function noteStable(state: RecoveryState): RecoveryState {
@@ -171,10 +170,6 @@ export interface StallEvidence {
   frozenMs: number;
   /** `bufferedPosition` advanced since the previous sample. */
   growing: boolean;
-  /** The current source exposes a variant ladder (HLS master parsed). */
-  hasLadder: boolean;
-  /** Index of the next rung DOWN on that ladder, or null when already lowest. */
-  nextRung: number | null;
 }
 
 export interface RecoveryDecision {
@@ -217,43 +212,20 @@ export function decideRecovery(
     return { action: { kind: 'wait', because: 'downloading' }, state };
   }
 
-  // ── Rule 2: ask for less. ────────────────────────────────────────────────
+  // ── Rule 2: soft repair. ────────────────────────────────────────────────
   //
-  // First because it is the cheapest remedy that actually changes the equation:
-  // the same server, the same position, a third of the bytes per second. The
-  // step is applied as an explicit variant lock (the HLS variant URL), which
-  // media3 honours exactly, rather than as a hint.
-  if (ev.hasLadder && ev.nextRung != null && state.qualityDrops < MAX_QUALITY_DROPS) {
-    return {
-      action: { kind: 'lower-quality', to: ev.nextRung },
-      state: spend(state, now, { qualityDrops: state.qualityDrops + 1 }),
-    };
-  }
-
-  // ── Rule 3: no ladder to step down into. Cap the adaptive selection. ─────
+  // Same URL, same position, SAME QUALITY — one re-open. This is the remedy for
+  // a pipeline that has stopped pulling (a decoder wedge, an extractor that gave
+  // up), which no amount of waiting fixes. Once only: a second reload of a URL
+  // that just failed is a repeat, not a repair.
   //
-  // `maxResolution` is the one knob that changes an ABR stream we cannot see the
-  // ladder of (the master read failed on this very connection, which is itself
-  // evidence). On Android it is a hard constraint; the player re-selects its own
-  // track below it WITHOUT a replace, so this costs no buffer at all.
-  if (!ev.hasLadder && state.caps < CAP_HEIGHTS.length) {
-    return {
-      action: { kind: 'cap', height: CAP_HEIGHTS[state.caps] },
-      state: spend(state, now, { caps: state.caps + 1 }),
-    };
-  }
-
-  // ── Rule 4: soft repair. ─────────────────────────────────────────────────
-  //
-  // Same URL, same position, one re-open. This is the remedy for a pipeline
-  // that has stopped pulling — a decoder wedge, an extractor that gave up —
-  // which no amount of waiting or bitrate reduction can fix. Once only: a
-  // second reload of a URL that just failed is a repeat, not a repair.
+  // ⚠️ IT MUST NOT CHANGE THE RUNG. A repair that comes back at a lower quality
+  // is not a repair, it is a decision the viewer did not make.
   if (state.reloads < 1) {
     return { action: { kind: 'reload' }, state: spend(state, now, { reloads: state.reloads + 1 }) };
   }
 
-  // ── Rule 5: another server. ──────────────────────────────────────────────
+  // ── Rule 3: another server, same quality. ────────────────────────────────
   //
   // Last, and bounded by the failover budget rather than by this module: the
   // walk's wrap is where an episode is declared unplayable (`failover.ts`).

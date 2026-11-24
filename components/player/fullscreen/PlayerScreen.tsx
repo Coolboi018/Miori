@@ -30,7 +30,7 @@
 // header, which is where they belong, because they are properties of the
 // decision rather than of this screen.
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   BackHandler,
@@ -41,7 +41,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useSafeAreaInsets, type EdgeInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useEvent } from 'expo';
 import {
@@ -53,7 +53,7 @@ import {
 } from 'expo-video';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationBar } from 'expo-navigation-bar';
-import Animated, { FadeIn, FadeOut, useSharedValue } from 'react-native-reanimated';
+import { useSharedValue } from 'react-native-reanimated';
 import {
   BottomBar,
   BOTTOM_BAR_H as CHROME_BOTTOM_BAR_H,
@@ -90,7 +90,6 @@ import {
   usingDeviceVolume,
 } from '@/lib/player/volume';
 import { SettingsPanel } from './SettingsPanel';
-import { type MenuRow } from './Menu';
 import {
   PIP_HANDOFF_GRACE_MS,
   PIP_SUBS_SETTLE_MS,
@@ -98,7 +97,6 @@ import {
   shouldAutoEnterPip,
   shouldHoldPlayback,
 } from '@/lib/player/pip';
-import { AppIcon } from '@/components/ui/AppIcon';
 import { SubtitleStage } from './SubtitleStage';
 import { publishCue } from '@/lib/player/cueStore';
 import { applyTuning, tuningFor } from '@/lib/player/tuning';
@@ -123,7 +121,6 @@ import {
   initialSpeed,
   isBoosting,
   rampBoost,
-  SPEED_STEPS,
   type SpeedState,
 } from '@/lib/player/speed';
 import { parseVTT, type Cue } from '@/lib/subtitles/vtt';
@@ -160,7 +157,7 @@ import {
   type SubtitleSizeKey,
 } from '@/lib/settings/store';
 import { useSetting } from '@/lib/settings/useSetting';
-import { font, motion, radii } from '@/lib/ui/tokens';
+import { motion } from '@/lib/ui/tokens';
 // The resolve's two windows and the failover budgets live in `lib/player/`
 // (`resolveWindow.ts`, `failover.ts`) rather than inline here: the check
 // battery has to drive the REAL decision code, and a component cannot be
@@ -189,22 +186,24 @@ import {
 } from '@/lib/player/recovery';
 import { contentTypeFor, isPlayableRoute, labelDisagrees, paramNumber } from '@/lib/player/source';
 import { InvalidLinkCard, PlaybackErrorCard } from './PlayerCards';
+import { Scrim, SkipButtonHost, UnlockAffordance } from './PlayerOverlays';
+import { ABOVE_BAR_GAP } from './playerLayout';
+import { styles } from './playerStyles';
+import { menuTitle, usePlayerMenuRows } from './usePlayerMenuRows';
 import { nextWalkIndex, pickStartIndex, readSourcePref, saveSourcePref } from '@/lib/player/sourcePref';
 import {
   clearSourceTrip,
   clearSourceTrips,
   isSourceSkipped,
   noteSourcePlayed,
-  readSourceTrip,
   sessionProvenSource,
-  sourceSkipHint,
   tripKindForPlaybackFailure,
   tripKindForResolveFailure,
   tripSource,
 } from '@/lib/player/sourceLedger';
 import { readQualityPref, saveQualityPref } from '@/lib/player/qualityPref';
 import { dropResolveCache, readResolveCache, writeResolveCache } from '@/lib/player/resolveCache';
-import { setChromeVisible, useChromeVisible } from '@/lib/player/chromeVisibility';
+import { setChromeVisible } from '@/lib/player/chromeVisibility';
 import {
   isOffline,
   isOfflineError,
@@ -326,35 +325,7 @@ const FIRST_FRAME_TIMEOUT = 14_000;
 /** Allow one short native-surface remount before showing a render error. */
 const FRAME_RECOVERY_TIMEOUT = 5_000;
 
-/**
- * How far the chrome's generic skip button jumps, in seconds.
- *
- * The intro/outro button answers a MARKER — "this stretch is an opening, end
- * it" — and shows whenever the playhead is inside one, chrome or not. The
- * +85s button answers the NO-MARKER case: with no source-supplied window the
- * button keeps its seat but changes its job, jumping a fixed 85s. 85 is the
- * length of a typical opening-plus-recap (90s openings are the long tail; 85
- * lands inside even those), so one tap usually clears whatever unmarked
- * preamble the source baked into the file. Overlay-mode only: without a
- * marker there is nothing persistent to react to, and a permanent button on
- * the gesture surface is one more thing a pocket can find.
- */
-const SKIP_FORWARD_S = 85;
 
-/**
- * How far a floating control sits above the bottom bar's own top edge, in px.
- *
- * The bar measures 157pt, and its inner column starts 22pt below that edge —
- * that padding is the gradient's headroom, drawn above the timeline on purpose.
- * So a control seated at `barHeight` is already 22pt clear of the timeline, and
- * the extra 12pt on top of it read as detached: the up-next card and the skip
- * pill floated visibly higher than the transport they belong to. 2pt is the
- * hairline that says "overlay, not part of the bar"; the headroom does the rest.
- *
- * One constant for both, because they share that edge — two literals would drift
- * apart on the next tweak and look like two accidents.
- */
-const ABOVE_BAR_GAP = 2;
 
 /**
  * Fallback for the bottom chrome's height, until the bar has been measured.
@@ -870,14 +841,6 @@ export default function LandscapePlayer() {
   const budgetRef = useRef<FailBudget>(freshBudget());
   /** The stall recovery ladder's running state. See `lib/player/recovery.ts`. */
   const recoveryRef = useRef<RecoveryState>(initialRecovery());
-  /**
-   * True while the current rung was chosen BY THE LADDER, not by the viewer.
-   *
-   * The difference is a disk write: a reduction earned on a train must not
-   * become the remembered quality of the series (`onFirstFrame` writes the
-   * proven rung). It still travels in memory, so a hop carries it.
-   */
-  const autoQualityRef = useRef(false);
   /** `bufferedPosition` at the previous health sample, to tell slow from dead. */
   const lastBufferedRef = useRef(-1);
   /** Previous `player.status`, so "it left BUFFERING" can count as progress. */
@@ -1446,10 +1409,10 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // (no selection) writes nothing here — `onPickQuality` is where an
     // explicit Auto CLEARS the memory.
     const locked = qualitySelRef.current;
-    // A rung the RECOVERY ladder stepped down into is a fact about this
-    // connection, not a preference for this show. Persisting it would make one
-    // slow minute the permanent quality of the series.
-    if (locked && locked.src === srcIndexRef.current && !autoQualityRef.current) {
+    // The ladder no longer changes quality at all (24 Nov — see
+    // `lib/player/recovery.ts`), so a locked rung is ALWAYS the viewer's own
+    // choice and there is no automatic reduction left to refuse to persist.
+    if (locked && locked.src === srcIndexRef.current) {
       const label = variantsRef.current[locked.src]?.[locked.v]?.label;
       if (label && label !== qualityPrefRef.current) {
         qualityPrefRef.current = label;
@@ -1930,12 +1893,6 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * thumb).
    */
   const pokeControls = useCallback(() => {
-    if (!showControlsRef.current) {
-      showControlsRef.current = true;
-      setChromeVisible(true);
-    } else {
-      setChromeVisible(true);
-    }
     showControlsRef.current = true;
     setChromeVisible(true);
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -2481,6 +2438,34 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     return v < 0 ? null : { src: si, v };
   }, []);
 
+  /**
+   * WHERE A REPLACE SHOULD COME BACK TO.
+   *
+   * `player.currentTime` is the live playhead; `positionRef` is the mirror that
+   * survives a reset. A failed `replaceAsync` puts the native playhead back to
+   * 0, and a switch that armed its restore from the live value alone would then
+   * "resume" the next open at 0:00 — the episode restarts because the viewer
+   * changed quality or source. The LARGEST of the two is the truth, which is the
+   * rule the reconnect path already used; this is that rule, once.
+   */
+  const resumeAt = useCallback(
+    () => Math.max(player.currentTime, positionRef.current),
+    [player]
+  );
+
+  /**
+   * Arm the restore, unless a target is already waiting.
+   *
+   * "Already waiting" wins on purpose: a reconnect position belongs to the
+   * connection that dropped, and a later automatic decision must not overwrite
+   * it with a playhead the failed replace has since reset.
+   */
+  const armResume = useCallback(() => {
+    if (pendingSeek.current != null) return;
+    const at = resumeAt();
+    if (at > 0) pendingSeek.current = at;
+  }, [resumeAt]);
+
   const failover = useCallback((reason?: string) => {
     if (offlineRef.current) {
       offlineBlockedRef.current = true;
@@ -2498,8 +2483,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     if (reason && /429/.test(reason) && !rateLimitRetryUsedRef.current) {
       rateLimitRetryUsedRef.current = true;
       clearFrameWatchdog();
-      const at = player.currentTime;
-      if (at > 0) pendingSeek.current = at;
+      armResume();
       const timer = setTimeout(() => {
         setReloadNonce((n) => n + 1);
       }, 2000);
@@ -2563,13 +2547,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       }
       budgetRef.current = spendRound(budgetRef.current);
       // Exhausted: fresh signed URLs, try the whole list again.
-      // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+      armResume();
       // JOIN, DON'T STACK. A resolve may already be in flight — a Retry the
       // viewer tapped while the walk was ending, or the wrap of a parallel
       // failure path. Starting a second resolve on top doubles the network
@@ -2603,13 +2581,7 @@ if (pendingSeek.current == null) {
     if (failing?.refresh && !refreshedRef.current.has(i) && !refreshBusyRef.current) {
       refreshedRef.current.add(i);
       refreshBusyRef.current = true;
-      // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+      armResume();
       // The variant selection hung off the dead token's urls; the fresh source
       // restarts on its master.
       if (qualitySelRef.current) {
@@ -2678,18 +2650,12 @@ if (pendingSeek.current == null) {
     // stored one is up to `SAVE_EVERY` seconds behind, and a source that dies
     // mid-scene should not restart the scene.
     if (nextRow != null) {
-      // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+      armResume();
       setSrcIndex(nextRow);
     } else {
       wrapLoad();
     }
-  }, [load, player, clearFrameWatchdog, animeId, epNum, qualityForSource, bumpLedger]);
+  }, [load, clearFrameWatchdog, animeId, epNum, qualityForSource, bumpLedger, armResume]);
 
   failoverRef.current = failover;
 
@@ -2700,11 +2666,19 @@ if (pendingSeek.current == null) {
   /**
    * THE RECOVERY LADDER, as this screen runs it.
    *
-   * `decideRecovery` owns the ORDER (wait → less bitrate → soft reload →
-   * failover); this function owns the side effects, which is why it is not
-   * pure. The one rule that matters here: NOTHING in this function may touch
-   * the player while the ladder says `wait`. A stream that is still downloading
-   * is doing exactly what it should, just slowly.
+   * `decideRecovery` owns the ORDER (wait → one in-place reload → the next
+   * source); this function owns the side effects, which is why it is not pure.
+   *
+   * TWO RULES, both from the 24 Nov device report:
+   *
+   *   1. NOTHING here may touch the player while the ladder says `wait`. A
+   *      stream that is still downloading is doing exactly what it should, just
+   *      slowly, and the ring is the honest UI for that.
+   *   2. NOTHING here may change the QUALITY. "I had selected 720p, it reloaded
+   *      and came back at 360p" is the bug: a hiccup is not consent to lower the
+   *      rung the viewer paid attention to pick. Every remedy below keeps the
+   *      request identical — same URL, same rung, same audio — and only the
+   *      server is allowed to change, at the end, when nothing else is left.
    */
   const recoverStream = useCallback(
     (ahead: number | null, frozenMs: number, growing: boolean) => {
@@ -2716,85 +2690,24 @@ if (pendingSeek.current == null) {
       }
 
       const now = Date.now();
-      const si = srcIndexRef.current;
-      const ladder = variantsRef.current[si] ?? null;
-      const sel = qualitySelRef.current;
-      let rung: number | null = null;
-      if (ladder && ladder.length) {
-        if (sel && sel.src === si) rung = sel.v;
-        else {
-          // Auto: the observed height is the rung that is playing, so "one
-          // below it" is a real step down rather than a guess at the top.
-          const height = liveHeightRef.current;
-          const found = height == null ? 0 : ladder.findIndex((v) => (v.height ?? 0) <= height);
-          rung = found < 0 ? 0 : found;
-        }
-      }
-      const nextRung = ladder && rung != null && rung + 1 < ladder.length ? rung + 1 : null;
-
-      const decision = decideRecovery(
-        recoveryRef.current,
-        { ahead, frozenMs, growing, hasLadder: !!ladder?.length, nextRung },
-        now
-      );
+      // No ladder position, no height, no ceiling: the decision needs ONLY how
+      // starved the pipeline is and whether bytes are still arriving.
+      const decision = decideRecovery(recoveryRef.current, { ahead, frozenMs, growing }, now);
       recoveryRef.current = decision.state;
 
-      /** Where to come back to — read BEFORE the replace, like every other switch. */
-      const armResume = () => {
-        if (pendingSeek.current != null) return;
-        const at = Math.max(player.currentTime, positionRef.current);
-        if (at > 0) pendingSeek.current = at;
-      };
+      // Where to come back to — the shared rule; see `armResume`.
 
       switch (decision.action.kind) {
         case 'wait':
           // The ring is already up (the verdict is `rebuffering`). Deliberately
           // nothing else: this is the case that saves a slow connection.
           return;
-        case 'lower-quality': {
-          const to = decision.action.to;
-          const label = ladder?.[to]?.label ?? null;
-          autoQualityRef.current = true;
-          qualitySelRef.current = { src: si, v: to };
-          setQualitySel(qualitySelRef.current);
-          // In memory only — `onFirstFrame` refuses to persist it.
-          if (label) qualityPrefRef.current = label;
-          // 🎧 DOWN WITHOUT A RELOAD, when the master muxes nothing: a separate
-          // audio rendition is lost by a variant swap, and a swap also throws
-          // away the buffered bytes the ladder is trying to protect. A ceiling
-          // steps the bitrate down in place. No `setRecovering` either — there
-          // is no reload to announce, and the ring comes from the health
-          // monitor, which already sees the frozen playhead.
-          if (ladder && ladder[0]?.separateAudio === true) {
-            try {
-              player.maxResolution = capFor(ladder[to]);
-            } catch {
-              /* the native player may already be released */
-            }
-            return;
-          }
-          armResume();
-          setRecovering(true);
-          recoveryOpenRef.current = true;
-          setReloadNonce((n) => n + 1);
-          return;
-        }
-        case 'cap': {
-          // No ladder to step into (the master read failed on this very
-          // connection, which is itself evidence). `maxResolution` is a hard
-          // ABR ceiling on Android: the player re-selects its own track below it
-          // WITHOUT a reload, so this costs no buffer at all.
-          try {
-            player.maxResolution = {
-              width: Math.round((decision.action.height * 16) / 9),
-              height: decision.action.height,
-            };
-          } catch {
-            /* the native player may already be released */
-          }
-          setRecovering(true);
-          return;
-        }
+        // ⚠️ `lower-quality` AND `cap` USED TO BE HERE, and they are the
+        // 360p-instead-of-720p report. They wrote `qualitySel`/`maxResolution`
+        // on their own and re-opened the item to land the change — an automatic
+        // quality decision plus a replace, on the connection least able to
+        // absorb either. `decideRecovery` no longer produces them; if one ever
+        // comes back, it must come back with a setting the viewer turned on.
         case 'reload':
           armResume();
           setRecovering(true);
@@ -2807,11 +2720,10 @@ if (pendingSeek.current == null) {
           return;
       }
     },
-    // Refs and setters only: the ladder reads the episode's caches through the
-    // refs it was handed, and `positionRef` is the playhead's own mirror. A
-    // dependency on `epNum` here would rebuild the callback mid-episode for no
-    // behaviour at all.
-    [player]
+    // Refs and the shared arm rule only: the ladder reads the episode's caches
+    // through the refs it was handed. A dependency on `epNum` here would rebuild
+    // the callback mid-episode for no behaviour at all.
+    [armResume]
   );
   recoverStreamRef.current = recoverStream;
 
@@ -2907,6 +2819,12 @@ if (pendingSeek.current == null) {
       /* the native player may already be released */
     }
 
+    // A stall inside the last two minutes means the cache's lock was, or still
+    // is, held by a download that is not moving. Read here, in the effect, so it
+    // describes the moment this item is prepared rather than some earlier one.
+    const stallRecent =
+      lastStallAtRef.current !== 0 && Date.now() - lastStallAtRef.current < 120_000;
+
     const source: VideoSource = {
       uri: variantUrl ?? s.url,
       headers: s.headers,
@@ -2925,10 +2843,18 @@ if (pendingSeek.current == null) {
       // is most likely held — so that open goes straight to the network. The
       // viewer's own opens (mount, Retry, a quality or source pick) keep the
       // configured cache exactly as before.
+      // ⚠️ AND NOT WHILE THE CONNECTION IS STRUGGLING. The same lock is why a
+      // stall and a re-open must never overlap, and the viewer's own pick during
+      // a bad patch is exactly that overlap: `CacheVariantIndex` is locked by
+      // the stalled download while the new item is prepared on the UI thread.
+      // Two quiet minutes is the recovery window: long enough to cover a stuck
+      // segment's retries, short enough that a normal pick later in the episode
+      // keeps the cache the viewer asked for.
       useCaching:
         !recoveryOpenRef.current &&
         Platform.OS === 'android' &&
-        readSetting('player.cache') !== 'off',
+        readSetting('player.cache') !== 'off' &&
+        !stallRecent,
       // ⚠️ `'auto'` was WRONG for token URLs and is documented as the bug above
       // (contentTypeFor / labelAgrees). The correction history, briefly, so the
       // next session does not restore it: the old `'hls'`-always was wrong
@@ -3085,7 +3011,6 @@ if (pendingSeek.current == null) {
    */
   useEffect(() => {
     recoveryRef.current = initialRecovery();
-    autoQualityRef.current = false;
     lastBufferedRef.current = -1;
     frameWatchdogStretchRef.current = 0;
     // A NEW EPISODE IS A NEW CONNECTION'S WORTH OF PATIENCE. Both of these are
@@ -3697,42 +3622,16 @@ if (pendingSeek.current == null) {
   }, [menu, qualityPhase, gatherVariants]);
 
   /**
-   * One entry per DISTINCT quality across every source, preferring the variant
-   * owned by the active source so picking it needs no source switch.
-   */
-  const mergedQualities = useMemo(() => {
-    const byLabel = new Map<string, { label: string; src: number; v: number; own: boolean }>();
-    for (let si = 0; si < sources.length; si++) {
-      const list = variantsBySource[si];
-      if (!list?.length) continue;
-      list.forEach((v, vi) => {
-        const own = si === srcIndex;
-        const cur = byLabel.get(v.label);
-        if (!cur || (own && !cur.own)) {
-          byLabel.set(v.label, { label: v.label, src: si, v: vi, own });
-        }
-      });
-    }
-    return [...byLabel.values()].sort((a, b) => {
-      const ah = heightOf(a.label);
-      const bh = heightOf(b.label);
-      if (ah !== bh) return bh - ah;
-      // A variant this source owns sorts first, so the common case is the
-      // top row rather than buried by an equal height from another server.
-      return Number(b.own) - Number(a.own);
-    });
-  }, [sources, variantsBySource, srcIndex]);
-
-  /**
    * A VIEWER DECISION RESTARTS EVERY AUTOMATIC VERDICT.
    *
-   * The ladder's reductions were answers to a connection; picking a quality or
-   * a server is the viewer saying the question has changed. Both the counters
-   * and the ABR ceiling go back to zero, so the next stall is judged on its own.
+   * The ladder's counting was an answer to a connection; picking a quality or a
+   * server is the viewer saying the question has changed. The counters and the
+   * ABR ceiling go back to zero, so the next stall is judged on its own. (The
+   * ceiling is now only ever written by a PICK, so this clears the pick's cap
+   * as well — the ladder itself no longer changes quality. See `recovery.ts`.)
    */
   const resetAutoRecovery = useCallback(() => {
     recoveryRef.current = initialRecovery();
-    autoQualityRef.current = false;
     try {
       player.maxResolution = null;
     } catch {
@@ -3758,7 +3657,7 @@ if (pendingSeek.current == null) {
       // there instead of at 0:00. `player.currentTime` is read synchronously
       // here rather than from `position`, because `position` trails the real
       // playhead by up to `timeUpdateEventInterval`.
-      const at = player.currentTime;
+      const at = resumeAt();
       if (key === 'auto') {
         qualitySelRef.current = null;
         setQualitySel(null);
@@ -3801,7 +3700,7 @@ if (pendingSeek.current == null) {
       }
       setMenu(null);
     },
-    [player, gatherVariants, animeId, resetAutoRecovery]
+    [player, gatherVariants, animeId, resetAutoRecovery, resumeAt]
   );
 
   /**
@@ -3880,13 +3779,7 @@ if (pendingSeek.current == null) {
         // without restarting the app.
         clearSourceTrips();
         bumpLedger();
-        // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+        armResume();
         budgetRef.current = freshBudget();
         void load({ fresh: true });
         setMenu(null);
@@ -3897,13 +3790,7 @@ if (pendingSeek.current == null) {
         setMenu(null);
         return;
       }
-      // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+      armResume();
       // Picking a SERVER is not picking Auto. The rung this show plays moves
       // with the viewer to the source they chose.
       const carried = qualityForSource(i);
@@ -3928,7 +3815,7 @@ if (pendingSeek.current == null) {
       void saveSourcePref(animeId, picked?.extId);
       setMenu(null);
     },
-    [player, animeId, load, qualityForSource, bumpLedger, resetAutoRecovery]
+    [animeId, load, qualityForSource, bumpLedger, resetAutoRecovery, armResume]
   );
 
   // -------------------------------------------------------------------------
@@ -4514,20 +4401,14 @@ if (pendingSeek.current == null) {
     resetAutoRecovery();
     const i = srcIndexRef.current;
     if (sourcesRef.current.length > 1) {
-      // Preserve an already-pending target (e.g. a reconnect position) rather than
-// overwriting it with a playhead that may have been reset to 0 by a failed
-// replaceAsync. Only adopt the current playhead when nothing is pending.
-if (pendingSeek.current == null) {
-  const at = player.currentTime;
-  if (at > 0) pendingSeek.current = at;
-}
+      armResume();
       qualitySelRef.current = null;
       setQualitySel(null);
       setSrcIndex((i + 1) % sourcesRef.current.length);
     } else {
       void load({ fresh: true });
     }
-  }, [player, load, resetAutoRecovery]);
+  }, [load, resetAutoRecovery, armResume]);
 
   const onBack = useCallback(() => {
     if (router.canGoBack?.()) router.back();
@@ -4626,6 +4507,12 @@ if (pendingSeek.current == null) {
         showControlsRef.current = false;
         setChromeVisible(false);
         setMenu(null);
+        // A LOCKED FRAME DOES NOT ADVANCE. The lock exists so a phone in a bag
+        // cannot pocket-seek; leaving a live "Up next" countdown on that frame
+        // lets a pocket do the one thing the lock is for — change the episode
+        // with no viewer present. The queue is a decision made now, and locking
+        // withdraws it; unlocking does not resurrect it.
+        setUpNext(null);
       }
       return !l;
     });
@@ -4931,167 +4818,23 @@ if (pendingSeek.current == null) {
   // -------------------------------------------------------------------------
   // Menu rows
   // -------------------------------------------------------------------------
-  const speedRows: MenuRow[] = useMemo(() => {
-    const rows: MenuRow[] = SPEED_STEPS.map((s) => ({
-      key: String(s),
-      label: s === 1 ? 'Normal' : `${formatRate(s)}×`,
-      selected: Math.abs(speed.committed - s) < 0.001,
-    }));
-    // A value the presets do not cover — show it as its own highlighted row so
-    // the viewer can see (and re-open) what they set, rather than having the
-    // selection silently fall through to the nearest preset.
-    const isPreset = SPEED_STEPS.some((s) => Math.abs(s - speed.committed) < 0.001);
-    rows.push({
-      key: '__custom',
-      label: 'Custom speed…',
-      hint: isPreset ? undefined : `${formatRate(speed.committed)}× now`,
-      selected: !isPreset,
+  // The sheet's rows are built in `usePlayerMenuRows` — see that module for the
+  // rules each one encodes (faded sources, the never-blank quality sheet).
+  const { speedRows, qualityRows, sourceRows, subRows, rootRows, qualityLabel, subsLabel } =
+    usePlayerMenuRows({
+      speed,
+      sources,
+      srcIndex,
+      failedSources,
+      ledgerTick,
+      resolving,
+      qualitySel,
+      qualityPhase,
+      liveHeight,
+      variantsBySource,
+      tracks,
+      trackIndex,
     });
-    return rows;
-  }, [speed.committed]);
-
-  const qualityRows: MenuRow[] = useMemo(() => {
-    const rows: MenuRow[] = [
-      {
-        key: 'auto',
-        label: 'Auto',
-        hint:
-          qualityPhase === 'loading'
-            ? 'Loading…'
-            : qualityPhase === 'failed'
-              ? 'Retrying failed'
-              : undefined,
-        selected: qualitySel === null,
-      },
-    ];
-
-    const isBusy = qualityPhase === 'loading' || qualityPhase === 'idle';
-
-    if (isBusy && mergedQualities.length === 0) {
-      rows.push({ key: '__loading', label: 'Loading qualities…', disabled: true });
-      return rows;
-    }
-
-    if (qualityPhase === 'failed' && mergedQualities.length === 0) {
-      rows.push({
-        key: '__failed',
-        label: 'Could not read qualities',
-        hint: 'Tap Refresh below',
-        disabled: true,
-      });
-    }
-
-    if (qualityPhase === 'empty' || (mergedQualities.length === 0 && !isBusy)) {
-      rows.push({
-        key: '__noq',
-        label: 'No selectable qualities',
-        hint: 'This episode plays as Auto',
-        disabled: true,
-      });
-    }
-
-    for (const q of mergedQualities) {
-      rows.push({
-        key: `${q.src}:${q.v}`,
-        label: q.label,
-        hint: q.own
-          ? mergedQualities.length === 1
-            ? 'only option'
-            : undefined
-          : `source ${q.src + 1}`,
-        selected: !!qualitySel && qualitySel.src === q.src && qualitySel.v === q.v,
-      });
-    }
-
-    if (qualityPhase !== 'loading') {
-      rows.push({
-        key: '__retryq',
-        label: 'Refresh quality list',
-        hint:
-          qualityPhase === 'failed'
-            ? 'The last read failed'
-            : mergedQualities.length < 2
-              ? 'Try for more qualities'
-              : undefined,
-      });
-    }
-
-    return rows;
-  }, [mergedQualities, qualitySel, qualityPhase]);
-
-  const sourceRows: MenuRow[] = useMemo(() => {
-    // READ, not merely listed: the ledger lives outside React, so a verdict
-    // written by `failover` is invisible to this memo without the counter. The
-    // reference is what makes the dependency real instead of a lint nit.
-    void ledgerTick;
-    const rows: MenuRow[] = sources.map((s, i) => ({
-      key: String(i),
-      label: s.quality ? `${s.quality} — source ${i + 1}` : `Source ${i + 1}`,
-      hint: i === srcIndex ? 'playing' : sourceSkipHint(s.extId),
-      selected: i === srcIndex,
-      // Faded, not disabled: the session is skipping it, and one tap is the
-      // explicit override (see `onPickSource`). A disabled row would strand a
-      // provider that has recovered but has not played yet.
-      muted: !!readSourceTrip(s.extId),
-    }));
-    // Providers that did not contribute sources (e.g. Katana/bingr blocked by
-    // the network) still show up, faded, with the reason — so the sheet
-    // explains WHY a source is missing instead of pretending it never existed.
-    const nameFor = (id: string) =>
-      id === 'filmu' ? 'Katana' : id === 'mega' ? 'Mega' : id;
-    // ONE ROW PER PROVIDER. `MenuRow.key` becomes the panel list's React key,
-    // so a provider reported twice is a duplicated key — React reports it as an
-    // ERROR and blames the whole row list (device report, 22 Nov: opening
-    // Source while an episode played showed "two children with the same key,
-    // failed-filmu"). The registry dedupes by id as well; this is the picker
-    // keeping its own promise rather than trusting a caller.
-    const seenFailed = new Set<string>();
-    failedSources.forEach((f) => {
-      if (seenFailed.has(f.id)) return;
-      seenFailed.add(f.id);
-      rows.push({
-        key: `failed-${f.id}`,
-        label: nameFor(f.id),
-        hint: f.reason,
-        selected: false,
-        disabled: true,
-      });
-    });
-    // NOTHING TO PICK YET is a state, not an empty sheet. The picker used to
-    // draw a title over a blank panel while the resolve was still in flight,
-    // which reads as a provider outage rather than as a wait.
-    if (sources.length === 0) {
-      rows.push({
-        key: '__resolving',
-        label: resolving ? 'Finding sources…' : 'No sources',
-        hint: resolving ? undefined : 'Tap Refresh once the episode is loaded',
-        disabled: true,
-      });
-    }
-    if (sources.length > 0) {
-      rows.push({
-        key: '__refresh',
-        label: 'Refresh sources',
-        hint: 'Re-check failed providers',
-      });
-    }
-    return rows;
-  }, [sources, srcIndex, failedSources, ledgerTick, resolving]);
-
-  const subRows: MenuRow[] = useMemo(() => {
-    const rows: MenuRow[] = [
-      { key: 'off', label: 'Off', selected: tracks.length === 0 || trackIndex < 0 },
-    ];
-    tracks.forEach((t, i) => {
-      rows.push({
-        key: String(i),
-        label: t.label || t.lang || `Track ${i + 1}`,
-        selected: tracks.length > 0 && trackIndex === i,
-      });
-    });
-    return rows;
-  }, [tracks, trackIndex]);
-
   const onPickSubs = useCallback((key: string) => {
     if (key === 'off') {
       // ⚠️ NOT `setTracks([])`, and that distinction was a one-way door.
@@ -5120,49 +4863,6 @@ if (pendingSeek.current == null) {
     }
     setMenu(null);
   }, [tracks]);
-
-  /**
-   * What the quality chip says.
-   *
-   * Under Auto this now reports the resolution the pipeline ACTUALLY selected,
-   * from `player.videoTrack`, rather than the word "Auto". "Auto" is a claim
-   * about a mechanism; "1080p" is a statement about what is being downloaded,
-   * and on a weak connection those are the only two facts a viewer actually
-   * has. It is also the same observation the automatic downgrade steps down
-   * from, so the label and the decision cannot disagree.
-   *
-   * Falls back to "Auto" whenever the pipeline will not say — an mp4 source has
-   * no tracks to report, and a ladder that is still gathering has nothing to
-   * compare against. Never invents a number.
-   */
-  const qualityLabel = useMemo(() => {
-    if (!qualitySel) {
-      return liveHeight ? `${liveHeight}p` : 'Auto';
-    }
-    const v = variantsBySource[qualitySel.src]?.[qualitySel.v];
-    return v?.label ?? 'Auto';
-  }, [qualitySel, variantsBySource, liveHeight]);
-
-  const subsLabel = tracks.length === 0 || trackIndex < 0 ? 'Off' : (tracks[trackIndex]?.lang ?? tracks[trackIndex]?.label ?? 'On');
-
-  // The panel's ROOT list — the drill-in entries, each carrying its live value
-  // as the hint so the root doubles as an at-a-glance summary of the episode.
-  const rootRows: MenuRow[] = useMemo(
-    () => [
-      { key: 'speed', label: 'Playback speed', hint: `${formatRate(effectiveRate(speed))}x`, to: 'speed', group: 'Playback' },
-      { key: 'quality', label: 'Quality', hint: qualityLabel, to: 'quality', group: 'Playback' },
-      {
-        key: 'source',
-        label: 'Source',
-        hint: sources.length > 1 ? `${srcIndex + 1}/${sources.length}` : 'Auto',
-        to: 'source',
-        group: 'Playback',
-      },
-      { key: 'subs', label: 'Subtitles', hint: subsLabel, to: 'subs', group: 'Subtitles' },
-      { key: 'subsSettings', label: 'Subtitle settings', hint: 'Size · position · style', to: 'subsSettings', group: 'Subtitles' },
-    ],
-    [speed, qualityLabel, sources.length, srcIndex, subsLabel]
-  );
 
   /**
    * THE SKIP BUTTON, AT SCREEN LEVEL — one seat, two jobs.
@@ -5770,7 +5470,7 @@ if (pendingSeek.current == null) {
       {/* Bottom-LEFT: the skip button owns the right edge above the bar, and
           an outro marker is exactly when both are on screen together. */}
       <NextEpisodeCard
-        number={upNext}
+        number={locked ? null : upNext}
         title={
           upNext == null
             ? null
@@ -5883,284 +5583,3 @@ if (pendingSeek.current == null) {
   );
 }
 
-/**
- * The lock screen's only affordance: a small unlock button.
- *
- * Deliberately centred-left and small rather than a full-width bar. The lock
- * exists so a phone in a bag does not pocket-seek, and the way out has to be
- * discoverable without being easy to hit by accident — a thumb across the frame
- * should never unlock it.
- */
-function UnlockAffordance({ onUnlock, insets }: { onUnlock: () => void; insets: EdgeInsets }) {
-  return (
-    <View
-      style={[styles.unlockBox, { paddingLeft: insets.left + 28 }]}
-      pointerEvents="box-none"
-    >
-      <Pressable
-        onPress={onUnlock}
-        accessibilityRole="button"
-        accessibilityLabel="Unlock controls"
-        style={({ pressed }) => [styles.unlockBtn, pressed ? styles.playPressed : null]}
-      >
-        <AppIcon name="unlock" size={24} color="#fff" strokeWidth={2} />
-      </Pressable>
-    </View>
-  );
-}
-
-function menuTitle(m: MenuId): string {
-  switch (m) {
-    case 'root':
-      return 'Player settings';
-    case 'speed':
-      return 'Playback speed';
-    case 'quality':
-      return 'Quality';
-    case 'source':
-      return 'Source';
-    case 'subsSettings':
-      return 'Subtitle settings';
-    default:
-      return 'Subtitles';
-  }
-}
-
-function heightOf(label: string): number {
-  const m = /(\d{3,4})p?/.exec(label);
-  return m ? parseInt(m[1], 10) : 0;
-}
-
-
-
-const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  scrim: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0,0,0,0.18)',
-  },
-  unlockBox: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: 'center',
-    alignItems: 'flex-start',
-  },
-  playPressed: {
-    opacity: 0.6,
-  },
-  unlockBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  skipButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radii.full,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-  },
-  skipPressed: {
-    opacity: 0.65,
-  },
-  /**
-   * The floating skip button's seat. `right`/`bottom` are set inline
-   * (`insets.right + 12`, `barHeight + ABOVE_BAR_GAP`) because both are measured — the
-   * same rule the toast obeys: the offset names the real bar, not a guess of
-   * it, so the button sits just above the bar in every state and does not
-   * move when the chrome hides.
-   */
-  skipFloat: {
-    position: 'absolute',
-    alignItems: 'flex-end',
-  },
-  skipForward: {
-    // The +85s variant carries one digit-group more than "Skip opening"; a
-    // touch more horizontal padding keeps the pill's proportions calm.
-    paddingHorizontal: 14,
-  },
-  skipLabel: {
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 13,
-    lineHeight: 16,
-  },
-  customSpeedCard: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -120 }, { translateY: -90 }],
-    width: 240,
-    padding: 18,
-    borderRadius: 16,
-    backgroundColor: 'rgba(20, 20, 27, 0.97)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
-    elevation: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 22,
-  },
-  customSpeedTitle: {
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 16,
-    marginBottom: 4,
-  },
-  customSpeedHint: {
-    color: 'rgba(255,255,255,0.5)',
-    fontFamily: font.regular,
-    fontSize: 12,
-    marginBottom: 12,
-  },
-  customSpeedInput: {
-    height: 44,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 18,
-    marginBottom: 14,
-  },
-  customSpeedActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 8,
-  },
-  customSpeedBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  customSpeedBtnPrimary: {
-    backgroundColor: 'rgba(255,255,255,0.22)',
-  },
-  customSpeedBtnText: {
-    color: 'rgba(255,255,255,0.85)',
-    fontFamily: font.medium,
-    fontSize: 13,
-  },
-  customSpeedBtnTextPrimary: {
-    color: '#fff',
-    fontFamily: font.semibold,
-    fontSize: 13,
-  },
-});
-
-const Scrim = memo(function Scrim({
-  locked,
-  panelOpen,
-  menu,
-  scrubActive,
-}: {
-  locked: boolean;
-  panelOpen: boolean;
-  menu: MenuId;
-  scrubActive: boolean;
-}) {
-  const visible = useChromeVisible();
-  const topUp = visible && !locked && !panelOpen && !menu;
-  const bottomBarUp = (visible && !locked && !panelOpen) || scrubActive;
-  if (!(topUp || bottomBarUp)) return null;
-  return <View style={styles.scrim} pointerEvents="none" />;
-});
-
-const SkipButtonHost = memo(function SkipButtonHost({
-  activeSkip,
-  locked,
-  panelOpen,
-  scrubActive,
-  barHeight,
-  switching,
-  insets,
-  seekWithGrace,
-  player,
-  durationRef,
-  positionRef,
-}: {
-  activeSkip: { kind: 'opening' | 'ending'; start: number; end: number } | null;
-  locked: boolean;
-  panelOpen: boolean;
-  scrubActive: boolean;
-  barHeight: number;
-  /** The episode-transition gate — a skip here would seek the item being left. */
-  switching: boolean;
-  insets: EdgeInsets;
-  seekWithGrace: (apply: () => void, target?: number) => void;
-  player: any;
-  durationRef: any;
-  positionRef: any;
-}) {
-  const visible = useChromeVisible();
-  const bottomBarUp = (visible && !locked && !panelOpen) || scrubActive;
-
-  if (locked || switching) return null;
-
-  if (activeSkip) {
-    return (
-      <View
-        pointerEvents="box-none"
-        style={[styles.skipFloat, { right: insets.right + 12, bottom: barHeight + ABOVE_BAR_GAP }]}
-      >
-        <Animated.View entering={FadeIn} exiting={FadeOut}>
-          <Pressable
-            onPress={() => {
-              const skipTarget = Math.ceil(activeSkip.end);
-              seekWithGrace(() => {
-                void player.seekBy(skipTarget - player.currentTime);
-              }, skipTarget);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel={activeSkip.kind === 'opening' ? 'Skip opening' : 'Skip ending'}
-            style={({ pressed }) => [styles.skipButton, pressed ? styles.skipPressed : null]}
-          >
-            <AppIcon name="skipForward" size={16} color="#fff" strokeWidth={2.5} />
-            <Text style={styles.skipLabel}>
-              {activeSkip.kind === 'opening' ? 'Skip opening' : 'Skip ending'}
-            </Text>
-          </Pressable>
-        </Animated.View>
-      </View>
-    );
-  }
-
-  if (bottomBarUp && !panelOpen) {
-    return (
-      <View
-        pointerEvents="box-none"
-        style={[styles.skipFloat, { right: insets.right + 12, bottom: barHeight + ABOVE_BAR_GAP }]}
-      >
-        <Animated.View entering={FadeIn} exiting={FadeOut}>
-          <Pressable
-            onPress={() => {
-              const dur = durationRef.current;
-              const target = Math.floor(positionRef.current) + SKIP_FORWARD_S;
-              const clamped = dur > 0 ? Math.min(target, Math.max(0, dur - 0.5)) : target;
-              seekWithGrace(() => {
-                void player.seekBy(clamped - player.currentTime);
-              }, clamped);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel={`Skip forward ${SKIP_FORWARD_S} seconds`}
-            style={({ pressed }) => [styles.skipButton, styles.skipForward, pressed ? styles.skipPressed : null]}
-          >
-            <AppIcon name="skipForward" size={16} color="#fff" strokeWidth={2.5} />
-            <Text style={styles.skipLabel}>{`+${SKIP_FORWARD_S}s`}</Text>
-          </Pressable>
-        </Animated.View>
-      </View>
-    );
-  }
-
-  return null;
-});

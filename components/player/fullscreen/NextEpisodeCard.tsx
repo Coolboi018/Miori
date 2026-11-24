@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { font, radii } from '@/lib/ui/tokens';
 
 /**
@@ -69,6 +69,17 @@ export const NextEpisodeCard = memo(function NextEpisodeCard({
     let remaining = seconds;
     setLeft(seconds);
     const id = setInterval(() => {
+      /**
+       * A COUNTDOWN DOES NOT RUN WHILE THE APP IS AWAY.
+       *
+       * `setInterval` is throttled in the background and then delivered in a
+       * burst on Android — which is exactly the shape that advances an episode
+       * the moment the viewer comes back from a notification, or fires the
+       * countdown late against a playhead that is no longer at the end. Time
+       * spent outside the app is not time spent deciding, so the tick is dropped
+       * and the digit stays where it was.
+       */
+      if (AppState.currentState !== 'active') return;
       remaining -= 1;
       setLeft(Math.max(0, remaining));
       if (remaining <= 0) {

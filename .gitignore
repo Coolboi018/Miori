@@ -10,6 +10,9 @@ web-build/
 *.jks
 *.p12
 *.mobileprovision
+# Local EAS credentials backup — contains keystore passwords, never commit
+credentials.json
+credentials/
 *.orig.*
 npm-debug.*
 yarn-debug.*

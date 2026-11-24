@@ -122,16 +122,45 @@ export function initialRecovery(): RecoveryState {
 }
 
 /**
- * The stream produced a frame: the failing stretch is over.
+ * The stream produced a frame. That ends the remedy stretch — and NOTHING else.
  *
- * `actions` and `reloads` restart because the next stall is a NEW event with a
- * fresh set of remedies. `qualityDrops` and `caps` deliberately do NOT: the
- * reduction is why the frame landed, and re-offering the rung that starved
- * would make the player oscillate up and down every fifteen seconds on exactly
- * the connection least able to absorb a `replaceAsync`. A new EPISODE starts
- * over (`initialRecovery`), and the viewer can always pick Auto by hand.
+ * ⚠️ `reloads` IS DELIBERATELY NOT RESET HERE (24 Nov). It used to be, and that
+ * made a soft reload unbounded: reload → a frame → stall → reload → a frame → …
+ * Every one of those re-opens the native media source, which `expo-video`
+ * prepares on the Android MAIN thread (`replaceImpl` → `appContext.mainQueue`).
+ * With the disk cache on, that path takes the cache index's `@Synchronized`
+ * lock, which a stuck segment download is holding — so the reload loop is what
+ * froze the UI thread and got the app killed, on a connection where the UI could
+ * least afford it.
+ *
+ * One soft reload per failing stretch is what the rule always said it was ("a
+ * second reload of a URL that just failed is a repeat, not a repair"); it is now
+ * also what the code does. `noteStable` is where the budget comes back.
+ *
+ * `actions` and the cooldown still restart, because the next stall is a NEW
+ * event whose cheap remedies deserve to be weighed again. `qualityDrops` and
+ * `caps` deliberately do NOT reset: the reduction is why the frame landed, and
+ * re-offering the rung that starved would make the player oscillate every
+ * fifteen seconds on exactly the connection least able to absorb a replace.
  */
 export function noteRecovered(state: RecoveryState): RecoveryState {
+  return { ...state, actions: 0, lastActionAt: 0 };
+}
+
+/**
+ * The stream PROVED itself — a quiet minute with a playhead that really moved
+ * (`provesStable` in `lib/player/failover.ts` decides when).
+ *
+ * This is the only thing that hands the reload budget back, and it is what keeps
+ * a long, healthy episode working: one hiccup mid-episode earns its soft reload,
+ * and ten quiet minutes later a second hiccup earns another. A broken source
+ * never gets here, so the loop above cannot restart.
+ *
+ * `qualityDrops`/`caps` still survive: they describe this connection, and a
+ * successful quiet minute at 480p is not evidence that 1080p would have worked.
+ * A new EPISODE still starts completely over (`initialRecovery`).
+ */
+export function noteStable(state: RecoveryState): RecoveryState {
   return { ...state, actions: 0, reloads: 0, lastActionAt: 0 };
 }
 

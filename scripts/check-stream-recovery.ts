@@ -48,6 +48,7 @@ import {
   initialRecovery,
   MAX_QUALITY_DROPS,
   noteRecovered,
+  noteStable,
   RECOVERY_COOLDOWN_MS,
   type RecoveryState,
   type StallEvidence,
@@ -259,11 +260,46 @@ section('5. a frame ends the stretch but keeps the reductions');
     lastActionAt: 5_000,
   };
   const revived = noteRecovered(spent);
-  check('a rendered frame restarts the remedy budget', [revived.actions, revived.reloads], [0, 0]);
-  check('…and the cooldown', revived.lastActionAt, 0);
+  check('a rendered frame restarts the remedy budget', [revived.actions, revived.lastActionAt], [0, 0]);
+  check(
+    '…and KEEPS the reload it already spent — one soft re-open per failing stretch (24 Nov)',
+    revived.reloads,
+    spent.reloads
+  );
   check(
     '…but KEEPS the reduction that earned it',
     [revived.qualityDrops, revived.caps],
+    [spent.qualityDrops, spent.caps]
+  );
+
+  // THE 24 NOV FREEZE. `noteRecovered` used to zero `reloads` too, so a source
+  // that rendered a frame and died could reload every eight seconds forever.
+  // Each of those re-opens `prepare()`s the native source on the Android MAIN
+  // thread, behind the disk cache's lock — which a stuck segment holds.
+  // Both states have already spent every ceiling, so the only remedy left on the
+  // no-ladder path is the soft reload — which is the one being counted here.
+  const spentCeilings = { caps: CAP_HEIGHTS.length, lastActionAt: 0 };
+  const oldShapeReloads = { ...spent, ...spentCeilings, reloads: 0 };
+  check(
+    'the OLD shape (a frame clears the reload) can reload without end — WRONG, watched failing',
+    decideRecovery(oldShapeReloads, stuck(null, false), 20_000).action.kind,
+    'reload'
+  );
+  check(
+    'the real rule: after one reload the ladder moves on to another server',
+    decideRecovery({ ...revived, ...spentCeilings }, stuck(null, false), 20_000).action.kind,
+    'failover'
+  );
+
+  const stable = noteStable(spent);
+  check(
+    'a PROVEN stream ends the stretch, reload budget included',
+    [stable.actions, stable.reloads, stable.lastActionAt],
+    [0, 0, 0]
+  );
+  check(
+    '…and still keeps the reduction the connection earned',
+    [stable.qualityDrops, stable.caps],
     [spent.qualityDrops, spent.caps]
   );
   check(
@@ -328,6 +364,31 @@ verify(
   'a rendered frame clears the recovery ring',
   /recoveryRef\.current = noteRecovered/.test(screen),
   'a ring that outlives the picture is the same lie as one that never appears'
+);
+// THE 24 NOV FREEZE — the two rules that keep a failing stretch bounded.
+verify(
+  'a frame alone never forgives the walk (the endless resolve→hop loop)',
+  /provesStable\(/.test(screen) && /noteStable\(recoveryRef\.current\)/.test(screen),
+  'resetting the budget on every frame let the walk re-resolve forever'
+);
+verify(
+  'a RECOVERY re-open bypasses the disk cache (the main-thread lock that froze the UI)',
+  /!recoveryOpenRef\.current/.test(screen) && /recoveryOpenRef\.current = false/.test(screen),
+  'preparing a cached source takes CacheVariantIndex\'s @Synchronized lock on the Android main thread'
+);
+verify(
+  'the silence verdict is bounded per item, per URL and per episode',
+  /positionRef\.current > SILENCE_MAX_POSITION_S/.test(screen) &&
+    /silentUrlsRef\.current\.has\(silentUrl\)/.test(screen) &&
+    /silentHopsRef\.current >= MAX_SILENT_HOPS/.test(screen),
+  'an unbounded silence walk re-opens the native source every eight seconds'
+);
+verify(
+  'the heal timer, the PiP timers and the 429 retry cannot outlive the screen',
+  /clearTimeout\(pipExitTimerRef\.current\)/.test(screen) &&
+    /clearTimeout\(subsRestoreTimerRef\.current\)/.test(screen) &&
+    /clearTimeout\(rateLimitRetryTimerRef\.current\)/.test(screen),
+  'a timer holding a released VideoPlayer is the red box on the way out'
 );
 
 // ---------------------------------------------------------------------------

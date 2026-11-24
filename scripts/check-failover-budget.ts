@@ -23,7 +23,10 @@
 import {
   MAX_FAILOVER_ROUNDS,
   MAX_FAILOVER_WALL_MS,
+  QUIET_RESET_MS,
+  STABLE_PLAY_SEC,
   healOnFrame,
+  provesStable,
   wrapVerdict,
 } from '../lib/player/failover';
 import { resolveInTwoWindows } from '../lib/player/resolveWindow';
@@ -108,10 +111,48 @@ section('1. The walk budget: one round = one walk down the list');
 }
 
 // ---------------------------------------------------------------------------
-// 2. healOnFrame — a rendered frame reconciles a standing error
+// 2. provesStable — a frame is NOT proof, and this is what replaced it
 // ---------------------------------------------------------------------------
 
-section('2. The first-frame reconcile: proof outranks the verdict');
+section('2. forgiveness is earned by a quiet minute, never by one frame');
+
+{
+  // THE BUG (24 Nov, the freeze that closed the app): `onFirstFrame` reset the
+  // whole budget, so a source that rendered a frame and died restored the walk
+  // every time. `wrapVerdict` could then never give up, and each pass re-opened
+  // the native media source — which expo-video prepares on the Android MAIN
+  // thread behind the disk-cache lock. The UI thread froze with it.
+  const oldShapeForgivesOnEveryFrame = true;
+  check(
+    'the OLD shape (a frame resets the walk) never terminates — WRONG, watched failing',
+    oldShapeForgivesOnEveryFrame && wrapVerdict(2, 1_000, 1_500) === 'reload',
+    true
+  );
+
+  check('a frame with a stall one second ago proves nothing', provesStable(30, 1_000), false);
+  check(
+    'a source that plays 8s and dies every 15s never earns a reset — the loop this pass removed',
+    provesStable(8, 15_000),
+    false
+  );
+  check('a frozen playhead proves nothing however quiet it was', provesStable(0, QUIET_RESET_MS), false);
+  check(
+    'a stream that moved and stayed quiet for the window does earn one',
+    provesStable(STABLE_PLAY_SEC, QUIET_RESET_MS),
+    true
+  );
+  check(
+    'MUTATION — one second short of the quiet window is not enough',
+    provesStable(STABLE_PLAY_SEC, QUIET_RESET_MS - 1),
+    false
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3. healOnFrame — a rendered frame reconciles a standing error
+// ---------------------------------------------------------------------------
+
+section('3. The first-frame reconcile: proof outranks the verdict');
 
 {
   // THE OLD SHAPE, watched failing: nothing cleared `error` when a frame
@@ -143,7 +184,7 @@ section('2. The first-frame reconcile: proof outranks the verdict');
 }
 
 // ---------------------------------------------------------------------------
-// 3. resolveInTwoWindows — a late answer is applied, not discarded
+// 4. resolveInTwoWindows — a late answer is applied, not discarded
 // ---------------------------------------------------------------------------
 
 // Milliseconds versions so the real function runs in script time.
@@ -162,7 +203,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: 
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-section('3. The resolve windows: a real failure is fast, a slow answer still lands');
+section('4. The resolve windows: a real failure is fast, a slow answer still lands');
 
 async function resolveWindows(): Promise<void> {
 {

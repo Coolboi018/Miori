@@ -174,6 +174,7 @@ import {
   freshBudget,
   healOnFrame,
   noteFailure,
+  provesStable,
   spendRound,
   wrapVerdict,
   type FailBudget,
@@ -182,6 +183,7 @@ import {
   decideRecovery,
   initialRecovery,
   noteRecovered,
+  noteStable,
   RECOVERY_EXHAUSTED_MESSAGE,
   type RecoveryState,
 } from '@/lib/player/recovery';
@@ -239,6 +241,35 @@ const NO_AUDIO_GRACE_MS = 3000;
 const NO_AUDIO_RECHECK_MS = 5000;
 const NO_AUDIO_MESSAGE =
   'This server is sending video with no audio track. Trying another source…';
+/**
+ * ⚠️ THE SILENCE VERDICT IS BOUNDED, AND ONLY TRUSTED AT AN ITEM'S START.
+ *
+ * `availableAudioTracks` is a synchronous native read of a list the decoder is
+ * still populating, and a stream that has been playing for ten minutes with
+ * sound is not evidence that a zero-length list right now means anything. So
+ * the verdict is only taken:
+ *
+ *   • inside the first `SILENCE_MAX_POSITION_S` of an item — a genuinely
+ *     video-only rendition is silent from its first seconds, which is the bug
+ *     this guard exists for; a reading taken mid-episode is far more likely to
+ *     be a transient enumeration state than a silent source;
+ *   • ONCE per source URL, so one misread cannot become a hop every eight
+ *     seconds; and
+ *   • at most `MAX_SILENT_HOPS` times per episode, so an all-silent provider
+ *     matrix costs two hops and the episode keeps playing (a picture with no
+ *     sound beats a stream that never settles).
+ *
+ * Every hop re-opens the native media source, and `expo-video` prepares that on
+ * the Android main thread — so an unbounded silence walk is not a cosmetic
+ * annoyance, it is the UI-thread stall this pass exists to remove.
+ */
+const SILENCE_MAX_POSITION_S = 45;
+const MAX_SILENT_HOPS = 2;
+/**
+ * How often the stability heartbeat asks whether the stream has earned its
+ * budgets back. See `armStableProof` below; `provesStable` owns the rule.
+ */
+const STABLE_HEARTBEAT_MS = 20_000;
 /** Below this a source's runtime is too short to judge "finished" by. */
 const SHORT_EPISODE = 300;
 const MARK_FINISHED = 0.9;
@@ -799,6 +830,8 @@ export default function LandscapePlayer() {
    * means "not parked". See `PIP_SUBS_SETTLE_MS`.
    */
   const subsHoldUntilRef = useRef(0);
+  /** Timer that restores subtitle publishing once the PiP window has settled. */
+  const subsRestoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Pending "did a PiP handoff start?" timer. See `PIP_HANDOFF_GRACE_MS`. */
   const pipHandoffTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
@@ -847,6 +880,33 @@ export default function LandscapePlayer() {
   const autoQualityRef = useRef(false);
   /** `bufferedPosition` at the previous health sample, to tell slow from dead. */
   const lastBufferedRef = useRef(-1);
+  /** Previous `player.status`, so "it left BUFFERING" can count as progress. */
+  const lastStatusRef = useRef<string | null>(null);
+  /**
+   * Last moment the health monitor declared a STALL. The stability heartbeat's
+   * quiet window is measured from here — see `provesStable`.
+   */
+  const lastStallAtRef = useRef(0);
+  /**
+   * The playhead when the heartbeat last looked, so it measures real movement.
+   *
+   * `-1` IS "NOT MEASURED YET", and the sentinel earns its keep: a new media item
+   * starts at 0, so anchoring on 0 and then reading a 30-second playhead would
+   * report thirty seconds of progress that nobody watched — and hand the walk its
+   * budget back on the strength of it. The first look after an item change only
+   * records the anchor.
+   */
+  const stableAnchorRef = useRef(-1);
+  /**
+   * This re-open is a RECOVERY one (a hop, a bitrate step, a soft reload), not
+   * the viewer's own open. Such a re-open passes `useCaching: false` — see the
+   * note at the `source` object.
+   */
+  const recoveryOpenRef = useRef(false);
+  /** Source URLs this episode has already been judged silent on. Once each. */
+  const silentUrlsRef = useRef<Set<string>>(new Set());
+  /** Silent-source hops spent this episode. Bounded by MAX_SILENT_HOPS. */
+  const silentHopsRef = useRef(0);
   /** Extra first-frame windows granted to a source that is genuinely downloading. */
   const frameWatchdogStretchRef = useRef(0);
   /**
@@ -1270,11 +1330,21 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         }
       });
     }
-    // A frame IS proof the current source works, so the retry budget resets
-    // here rather than on a timer — otherwise a long session would eventually
-    // refuse to fail over at all. The wall-clock budget resets with it: a
-    // surviving frame ends the failing stretch those two bounds measure.
-    budgetRef.current = freshBudget();
+    // ⚠️ ONE FRAME IS NOT PROOF, AND THIS USED TO SAY IT WAS.
+    //
+    // The line here was `budgetRef.current = freshBudget()`, and it is what made
+    // the walk endless on a weak connection: hop → a frame lands → every budget
+    // back to zero → stall fifteen seconds later → hop → … `wrapVerdict` can
+    // only give up once three WHOLE walks are spent, so it never did, and each
+    // pass re-resolved every extension and re-opened the native media source.
+    // `expo-video` prepares that source on the Android MAIN thread, and with the
+    // disk cache on (the default) it takes the cache index's lock — which a
+    // stalled segment download is holding. That is the freeze: the picture
+    // stops, the spinner stops, and Android eventually closes the app.
+    //
+    // Forgiveness now comes only from the stability heartbeat below: a minute
+    // with no stall and a playhead that really moved. A source that renders one
+    // frame and dies earns nothing, which is the whole point of the walk.
 
     /**
      * 🎧 SILENCE IS A FAILURE MODE, AND NOTHING ELSE LOOKS FOR IT.
@@ -1306,6 +1376,22 @@ const applyResumePosition = useCallback((resumeAt: number) => {
           watchForAudio(NO_AUDIO_RECHECK_MS, true);
           return;
         }
+        /**
+         * BOUNDED, ONCE PER SOURCE, AND ONLY WHILE THE ITEM IS YOUNG.
+         *
+         * A zero-length `availableAudioTracks` read is a snapshot of a list the
+         * decoder is still filling, so it is only trusted at an item's start —
+         * where a truly video-only rendition is silent by construction. Once per
+         * URL and at most `MAX_SILENT_HOPS` per episode, because every hop
+         * re-opens the native media source on the main thread and an unbounded
+         * silence walk is exactly the churn that froze this app.
+         */
+        if (positionRef.current > SILENCE_MAX_POSITION_S) return;
+        const silentUrl = sourceAtFrame?.url ?? '';
+        if (!silentUrl || silentUrlsRef.current.has(silentUrl)) return;
+        if (silentHopsRef.current >= MAX_SILENT_HOPS) return;
+        silentUrlsRef.current.add(silentUrl);
+        silentHopsRef.current += 1;
         // Deliberately NOT a ledger trip: one silent server must not hide the
         // provider's other rows, which are separate tokens on other hosts.
         failoverRef.current(NO_AUDIO_MESSAGE);
@@ -1911,6 +1997,19 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // was already released" red box on the way out.
         if (audioGuardRef.current) clearTimeout(audioGuardRef.current);
         audioGuardRef.current = null;
+        // EVERY OTHER TIMER THAT CAN OUTLIVE THIS SCREEN. Each of these holds a
+        // callback that touches the native player, and `useVideoPlayer` releases
+        // it on unmount — a `player.pause()` from a PiP-exit timer after that is
+        // the "shared object that was already released" throw, on the way out of
+        // the player, which is the least diagnosable place it can happen.
+        if (subsRestoreTimerRef.current) clearTimeout(subsRestoreTimerRef.current);
+        subsRestoreTimerRef.current = null;
+        if (pipHandoffTimerRef.current) clearTimeout(pipHandoffTimerRef.current);
+        pipHandoffTimerRef.current = null;
+        if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
+        pipExitTimerRef.current = null;
+        if (rateLimitRetryTimerRef.current) clearTimeout(rateLimitRetryTimerRef.current);
+        rateLimitRetryTimerRef.current = null;
         // The "up next" card unmounts with this screen and clears its own
         // countdown, so there is no timer left here to cancel.
       };
@@ -2393,6 +2492,8 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // the honest answer for that window. Set here rather than at each of the
     // walks's exits so no future exit can forget it.
     setRecovering(true);
+    // The hop this decision leads to is a RECOVERY re-open — see `useCaching`.
+    recoveryOpenRef.current = true;
 
     if (reason && /429/.test(reason) && !rateLimitRetryUsedRef.current) {
       rateLimitRetryUsedRef.current = true;
@@ -2441,6 +2542,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       const verdict = wrapVerdict(budgetRef.current.rounds, budgetRef.current.sinceMs, Date.now());
       if (verdict === 'giveup') {
         clearFrameWatchdog();
+        // No re-open follows a give-up, so the flag must not survive into the
+        // viewer's next attempt: a Retry is an ordinary open and keeps the cache.
+        recoveryOpenRef.current = false;
         // The cached list has now failed its whole walk. Drop it so the next
         // visit re-resolves instead of resurrecting the same dead URLs. (The
         // error card's Retry asks for a fresh resolve directly.)
@@ -2671,6 +2775,7 @@ if (pendingSeek.current == null) {
           }
           armResume();
           setRecovering(true);
+          recoveryOpenRef.current = true;
           setReloadNonce((n) => n + 1);
           return;
         }
@@ -2693,6 +2798,7 @@ if (pendingSeek.current == null) {
         case 'reload':
           armResume();
           setRecovering(true);
+          recoveryOpenRef.current = true;
           setReloadNonce((n) => n + 1);
           return;
         case 'failover':
@@ -2807,7 +2913,22 @@ if (pendingSeek.current == null) {
       // Android's native cache holds stream data for this watch session. The
       // app-level Low/Normal/High setting caps its total disk use; leaving the
       // player clears it after the native player has been released.
-      useCaching: Platform.OS === 'android' && readSetting('player.cache') !== 'off',
+      // ⚠️ A RECOVERY RE-OPEN DOES NOT TOUCH THE DISK CACHE, and that is a
+      // freeze fix, not a memory one. With caching on, building this media
+      // source runs `CacheVariantIndex.storageKeyResult` — `@Synchronized`, plus
+      // a file read — and `expo-video` does it on the Android MAIN thread while
+      // preparing the item. The cache's network interceptor takes the same lock
+      // on every response, so preparing a new source while a segment is stuck
+      // mid-download blocks the UI thread: the picture freezes, the spinner
+      // freezes, and Android closes the app. A recovery re-open is by definition
+      // happening on a struggling connection, which is the one moment that lock
+      // is most likely held — so that open goes straight to the network. The
+      // viewer's own opens (mount, Retry, a quality or source pick) keep the
+      // configured cache exactly as before.
+      useCaching:
+        !recoveryOpenRef.current &&
+        Platform.OS === 'android' &&
+        readSetting('player.cache') !== 'off',
       // ⚠️ `'auto'` was WRONG for token URLs and is documented as the bug above
       // (contentTypeFor / labelAgrees). The correction history, briefly, so the
       // next session does not restore it: the old `'hls'`-always was wrong
@@ -2847,6 +2968,9 @@ if (pendingSeek.current == null) {
      */
     // A new media item earns a fresh first-frame window: the previous item's
     // extensions must not shorten this one's patience.
+    // CONSUMED — the flag describes ONE re-open. Leaving it set would silently
+    // turn the cache off for the viewer's own next open.
+    recoveryOpenRef.current = false;
     frameWatchdogStretchRef.current = 0;
     armFrameWatchdog();
     void player
@@ -2964,6 +3088,15 @@ if (pendingSeek.current == null) {
     autoQualityRef.current = false;
     lastBufferedRef.current = -1;
     frameWatchdogStretchRef.current = 0;
+    // A NEW EPISODE IS A NEW CONNECTION'S WORTH OF PATIENCE. Both of these are
+    // per-episode by design and must not be reset by a source hop:
+    //   • the quiet window the stability heartbeat measures — an episode that
+    //     has not stalled yet has genuinely proved nothing yet either way;
+    //   • the silence allowance, so a provider matrix in which every row is
+    //     silent costs two hops for the whole episode rather than two per row.
+    lastStallAtRef.current = 0;
+    silentUrlsRef.current.clear();
+    silentHopsRef.current = 0;
     try {
       player.maxResolution = null;
     } catch {
@@ -3370,6 +3503,17 @@ if (pendingSeek.current == null) {
   // the other.
   useEffect(() => {
     playedRef.current = false;
+    // The stability heartbeat measures the playhead across ONE item, so its
+    // anchor moves with the item.
+    //
+    // ⚠️ THE ANCHOR IS THE ONLY HEARTBEAT STATE THAT BELONGS HERE. The quiet
+    // window (`lastStallAtRef`) and the silence allowance stay with the EPISODE
+    // (see the `epNum` effect): this effect also runs on every source hop, and
+    // clearing the quiet window there would RESTART it at zero — which reads as
+    // "quiet for fifty years" and hands the walk its budget back on the next
+    // heartbeat. That is the loop this pass removed, re-opened one hop at a time.
+    stableAnchorRef.current = -1;
+    lastStatusRef.current = null;
     // The parked-finale flag belongs to the media item that ended. A source,
     // quality or EPISODE switch re-runs this effect, and the fresh item is not
     // parked — leaving it set would make the first ▶ on the new episode rewind
@@ -3860,7 +4004,25 @@ if (pendingSeek.current == null) {
       // slow connection is exactly the case where "the buffer grew a little,
       // just far too slowly" must be distinguishable from "nothing came back".
       const bufferedNow = player.bufferedPosition;
-      const grew = lastBufferedRef.current >= 0 && bufferedNow > lastBufferedRef.current + 0.25;
+      /**
+       * ⚠️ `bufferedPosition` REPORTS **0.0** WHILE BUFFERING — the SDK's own
+       * getter collapses the readout in `STATE_BUFFERING` rather than answering
+       * `-1`. So during a rebuffer the delta below is always negative and the
+       * ladder's "still downloading, WAIT" rule could never fire on Android: it
+       * escalated on every stall, at 15s, forever.
+       *
+       * The second term is the honest evidence the numeric readout cannot give:
+       * the pipeline left BUFFERING between two samples, which means it received
+       * enough to become ready again. That is a slow-but-working connection, and
+       * the patience it earns (up to `DOWNLOADING_PATIENCE_MS`) is exactly what a
+       * weak phone on a weak link needs instead of another re-open.
+       */
+      const cameBackReady =
+        lastStatusRef.current !== 'readyToPlay' && player.status === 'readyToPlay';
+      lastStatusRef.current = player.status;
+      const grew =
+        (lastBufferedRef.current >= 0 && bufferedNow > lastBufferedRef.current + 0.25) ||
+        cameBackReady;
       lastBufferedRef.current = bufferedNow;
 
       const at = Date.now();
@@ -3929,6 +4091,10 @@ if (pendingSeek.current == null) {
        */
 
       if (verdict.health.kind === 'stalled') {
+        // THE QUIET WINDOW RESTARTS HERE. A stretch that reached a stall verdict
+        // has proven nothing, whatever frames happened to land inside it, so the
+        // heartbeat must not forgive the budget while this keeps happening.
+        lastStallAtRef.current = Date.now();
         // NOT a failover any more. Hopping servers throws away every byte
         // already buffered — the one thing a starved stream cannot afford — so
         // the ladder asks for less bitrate first, then reloads in place, and
@@ -3940,6 +4106,59 @@ if (pendingSeek.current == null) {
     const id = setInterval(tick, HEALTH_TICK_MS);
     return () => clearInterval(id);
   }, [player, healthBounds, readHealth, animeId, epNum, showCueAt]);
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * THE STABILITY HEARTBEAT — the only thing that forgives a failing stretch
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * The failover budget and the recovery ladder bound how much a BROKEN stream
+   * may cost. Something has to hand those budgets back, or a long session would
+   * eventually refuse to fail over at all — and the old answer, "a frame landed",
+   * is a lie a dead source tells for free.
+   *
+   * So the proof is measured instead of assumed: once every
+   * `STABLE_HEARTBEAT_MS`, if a picture is up, the playhead has advanced by at
+      * least `STABLE_PLAY_SEC` since the last look, and no stall verdict has been
+   * seen for `QUIET_RESET_MS`, then the failing stretch is over: the walk budget,
+   * the reload budget, the silent-hop allowance and the ABR ceilings all start
+   * again from a clean state.
+   *
+   * A stream that plays eight seconds and dies never accumulates the quiet
+   * minute, so the walk keeps its rounds and terminates — which is exactly the
+   * behaviour a weak connection needs from it: one bounded attempt, then a card
+   * with an honest sentence, instead of an endless resolve→re-open loop that
+   * blocks the UI thread behind the cache lock.
+   *
+   * Cheap by construction: six reads of a snapshot refs bag every twenty
+   * seconds, no render, nothing native beyond two `currentTime` reads.
+   */
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!mountedRef.current) return;
+      if (!firstFrameRef.current || errorRef.current != null) return;
+      const live = playerRef.current;
+      if (!live) return;
+      // A deck in the background does not advance a playhead. Move the anchor so
+      // the time away is neither counted as progress nor turned into a stall.
+      if (!appActiveRef.current) {
+        stableAnchorRef.current = live.currentTime;
+        return;
+      }
+      if (stableAnchorRef.current < 0) {
+        stableAnchorRef.current = live.currentTime;
+        return;
+      }
+      const played = live.currentTime - stableAnchorRef.current;
+      stableAnchorRef.current = live.currentTime;
+      if (!provesStable(played, Date.now() - lastStallAtRef.current)) return;
+      budgetRef.current = freshBudget();
+      recoveryRef.current = noteStable(recoveryRef.current);
+      silentHopsRef.current = 0;
+      silentUrlsRef.current.clear();
+    }, STABLE_HEARTBEAT_MS);
+    return () => clearInterval(id);
+  }, []);
 
   /**
    * Backgrounding must not look like a dead stream.
@@ -4244,6 +4463,20 @@ if (pendingSeek.current == null) {
   // Misc actions
   // -------------------------------------------------------------------------
   const onRetry = useCallback(() => {
+    /**
+     * JOIN, DO NOT STACK. A retry tapped while a resolve is already running used
+     * to start a SECOND full probe of every installed extension on the same
+     * failing connection — doubled traffic on the link that is already the reason
+     * the viewer is looking at this card, and one more chance to trip a provider
+     * into a session-long skip. The in-flight attempt is the answer; clearing the
+     * card hands the screen back to the loading stage, which says so honestly.
+     */
+    if (loadBusyRef.current) {
+      setFailure(null);
+      setError(null);
+      errorRef.current = null;
+      return;
+    }
     // Reset the budget, or "Try again" re-exhausts it on the first failure and
     // the button appears to do nothing. `load()` resets both budgets at its
     // top; these lines cover the same intention explicitly so the handler does
@@ -4325,6 +4558,10 @@ if (pendingSeek.current == null) {
   const onPipStart = useCallback(() => {
     pipActiveRef.current = true;
     setPipOn(true);
+    if (subsRestoreTimerRef.current) {
+      clearTimeout(subsRestoreTimerRef.current);
+      subsRestoreTimerRef.current = null;
+    }
     backgroundHoldRef.current = false;
     if (pipHandoffTimerRef.current) clearTimeout(pipHandoffTimerRef.current);
     pipHandoffTimerRef.current = null;
@@ -4354,6 +4591,16 @@ if (pendingSeek.current == null) {
     // when I come back" glitch. See the ref for the full picture.
     publishCue(null);
     subsHoldUntilRef.current = Date.now() + PIP_SUBS_SETTLE_MS;
+    if (subsRestoreTimerRef.current) clearTimeout(subsRestoreTimerRef.current);
+    subsRestoreTimerRef.current = setTimeout(() => {
+      subsRestoreTimerRef.current = null;
+      subsHoldUntilRef.current = 0;
+      try {
+        showCueAt(player.currentTime);
+      } catch {
+        /* player may be released */
+      }
+    }, PIP_SUBS_SETTLE_MS);
     if (pipExitTimerRef.current) clearTimeout(pipExitTimerRef.current);
     pipExitTimerRef.current = setTimeout(() => {
       pipExitTimerRef.current = null;
@@ -4362,9 +4609,11 @@ if (pendingSeek.current == null) {
       }
       backgroundHoldRef.current = true;
       desiredPlayingRef.current = false;
+      // Safe bare: the unmount cleanup clears `pipExitTimerRef`, so this cannot
+      // fire against a player `useVideoPlayer` has already released.
       player.pause();
     }, PIP_HANDOFF_GRACE_MS);
-  }, [player]);
+  }, [player, showCueAt]);
 
   const onToggleLock = useCallback(() => {
     setLocked((l) => {

@@ -107,6 +107,64 @@ export function wrapVerdict(
 }
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * A RENDERED FRAME IS NOT PROOF (24 Nov — the freeze that closed the app)
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The player used to reset this whole budget on every rendered frame, and that
+ * single line is what made the walk endless on a weak connection:
+ *
+ *     hop → a frame lands → rounds = 0, since = 0 → stall 15s later → hop → …
+ *
+ * `wrapVerdict` can only ever say `'giveup'` once `rounds` reaches
+ * `MAX_FAILOVER_ROUNDS`, so a reset per frame meant it never did. Each pass
+ * re-resolved every extension AND re-opened the native media source.
+ *
+ * That last part is not just wasted bytes. `expo-video` runs `prepare()` on the
+ * Android MAIN thread (`VideoModule.replaceImpl` → `appContext.mainQueue` →
+ * `ref.prepare()`), and with `useCaching` on — which is the default — building
+ * the media source takes `CacheVariantIndex`'s `@Synchronized` lock and reads a
+ * file. The cache's own network interceptor takes THE SAME lock on every
+ * response. So while a segment is stuck mid-download, a re-open blocks the UI
+ * thread behind it: the picture stops, the spinner stops (it is a UI-thread
+ * animation), the device sits there, and Android eventually ANRs and closes the
+ * app. "The whole app stuck and then it closed by itself" is that lock.
+ *
+ * So one frame only ends the REMEDY stretch (`recovery.ts`'s `noteRecovered`);
+ * it forgives none of this. What forgives a failing stretch is evidence that
+ * the stream actually HELD, which is what `provesStable` answers: the playhead
+ * really advanced, and the health monitor has not declared a stall for a while.
+ * A source that renders a frame and dies ten seconds later — exactly the source
+ * the walk exists to leave — earns nothing.
+ */
+
+/** How much real playback a heartbeat interval must see to count as progress. */
+export const STABLE_PLAY_SEC = 6;
+
+/**
+ * How long the stream must go WITHOUT a stall before a heartbeat may forgive.
+ *
+ * This is the number that bounds the loop. A failing stretch stalls every
+ * `STALL_MS` (15s) plus one remedy, so it never accumulates a quiet minute: the
+ * walk keeps its rounds and ends at `MAX_FAILOVER_ROUNDS`, as designed. A
+ * healthy episode is silent for this long between any two hiccups, so it keeps
+ * earning forgiveness for as long as it keeps playing.
+ */
+export const QUIET_RESET_MS = 60_000;
+
+/**
+ * Has the stream PROVEN itself, so the failing-stretch budgets may start over?
+ *
+ * Two facts, both required, and neither is something a single frame can fake:
+ * real playhead movement, and a stretch with no stall verdict in it. `sinceStallMs`
+ * may be `Infinity`/very large before any stall has been seen — that is the
+ * honest answer for "nothing has gone wrong yet".
+ */
+export function provesStable(playedSec: number, sinceStallMs: number): boolean {
+  return playedSec >= STABLE_PLAY_SEC && sinceStallMs >= QUIET_RESET_MS;
+}
+
+/**
  * The first-frame reconcile: what a rendered frame does to a standing error.
  *
  * A rendered frame is the one fact every failure verdict was waiting for, and

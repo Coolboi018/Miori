@@ -160,7 +160,13 @@ check(
 
 check(
   'closing the PiP window does not leave invisible audio',
-  /onPipStop[\s\S]{0,900}?player\.pause\(\)/.test(screenSrc),
+  // ANCHORED TO THE DECLARATION, not to the first mention of the name. The old
+  // pattern started at any `onPipStop` — including the doc comment above the
+  // timer refs — so unrelated code added between that comment and the handler
+  // could fail this check without the rule changing at all (24 Nov: two blocks
+  // of player refs pushed the distance from 564 to 935 characters). The rule is
+  // about the HANDLER, so the pattern starts at the handler.
+  /const onPipStop = useCallback[\s\S]{0,1400}?player\.pause\(\)/.test(screenSrc),
   'an expand must not pause; a close must'
 );
 

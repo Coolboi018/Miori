@@ -121,6 +121,28 @@ export async function isPresenceEnabled(): Promise<boolean> {
   }
 }
 
+/**
+ * The user's stored CHOICE about presence, or `null` when they have never made
+ * one.
+ *
+ * ⚠️ THIS IS NOT `isPresenceEnabled()` (25 Nov). That one answers "should a
+ * frame be sent", so an ABSENT key is false — the right default for a privacy
+ * switch, but it cannot tell "never asked" from "asked for OFF". The
+ * auto-enable on a saved Discord token needs exactly that difference, and
+ * reading it as "off means ask again" is what turned the switch back on the
+ * instant it was flipped: the credential change `setPresenceEnabled` publishes
+ * re-runs the reader, which re-enabled it, which notifies again.
+ */
+export async function readPresenceChoice(): Promise<boolean | null> {
+  try {
+    const raw = await AsyncStorage.getItem(ENABLED_KEY);
+    if (raw === null) return null;
+    return raw === '1';
+  } catch {
+    return null;
+  }
+}
+
 export async function setPresenceEnabled(on: boolean): Promise<void> {
   try {
     await AsyncStorage.setItem(ENABLED_KEY, on ? '1' : '0');

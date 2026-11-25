@@ -21,9 +21,9 @@ const path = require('path');
 // non-looping animator endpoint in `Logo/miori_*xml` — `scripts/check-splash.ts`
 // asserts all three. 1500 used to be here, which is past Android's ~1000ms
 // splash-animation budget: the icon was frozen mid-zoom (fill half-drawn, outline
-// still up) instead of finishing. The AVD's idle pulse loops after this point,
+// still up) instead of finishing. The AVD's rim-light loop begins at this point,
 // so a slow start still looks alive.
-const ANIMATION_DURATION_MS = '880';
+const ANIMATION_DURATION_MS = '960';
 
 // Files that make up the AVD, relative to project root.
 const AVD_FILES = [

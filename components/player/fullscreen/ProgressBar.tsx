@@ -584,7 +584,17 @@ export const ProgressBar = memo(function ProgressBar({
           <>
             {/* Halo first, so the knob draws over it. */}
             <Animated.View pointerEvents="none" style={[styles.halo, haloStyle]} />
-            <Animated.View style={[styles.handle, knobStyle]} />
+            {/* ⚠️ NOT A TOUCH TARGET — SEE `originXRef`.
+            `locationX` in a PanResponder's `nativeEvent` is relative to the
+            TOUCH TARGET, and this knob is a 12pt absolute child sitting at the
+            playhead. A press on it therefore reported locationX in [0, 12], so
+            `pageX - locationX` handed the bar the KNOB's page x as its own
+            origin: every such press read as a position a few pixels from 0:00,
+            the timeline snapped to the start under the finger, and the release
+            seeked there — a full re-buffer, reported as "reloading the whole
+            timeline". With this view out of the hit test the target is always
+            the measured hit area, whose locationX is the bar-relative one. */}
+        <Animated.View pointerEvents="none" style={[styles.handle, knobStyle]} />
           </>
         ) : null}
       </Animated.View>

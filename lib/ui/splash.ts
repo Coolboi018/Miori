@@ -9,11 +9,13 @@
 // THE LAUNCH ANIMATION IS NATIVE NOW (22 Nov)
 // ═══════════════════════════════════════════════════════════════════════════
 // The icon animation is an Android AnimatedVectorDrawable (`Logo/`), played by
-// the OS splash window itself: outline draws, silver fill arrives, the whole
-// mark settles — then it BREATHES until the app is ready. There is no in-app
-// splash overlay; the constants below that describe one are the parked
-// timeline of the overlay this replaced (still used by `AnimatedSplash.tsx`,
-// which is no longer mounted).
+// the OS splash window itself: the outline draws as a thinning pen, the silver
+// fill rises under it, the mark unfurls a few degrees and lands — then a thin
+// rim light breathes until the app is ready. Nothing on the artwork itself
+// moves after it lands (the 25 Nov re-choreography: the old breathing SCALE
+// read as jitter on a mark this dense). There is no in-app splash overlay; the
+// constants below that describe one are the parked timeline of the overlay
+// this replaced (still used by `AnimatedSplash.tsx`, which is not mounted).
 //
 // `nativeAnimationMs` is the load-bearing new number: it must equal the intro
 // the AVD actually finishes at, because it is what the plugin gives Android as
@@ -82,17 +84,20 @@ export const SPLASH = {
   /**
    * HOW LONG THE NATIVE ICON ANIMATION'S INTRO LASTS, in milliseconds.
    *
-   * The longest intro endpoint in `Logo/miori_*xml` (the settle and the fill
-   * both land at 880). Android advises keeping a splash icon animation at or
-   * under ~1000ms; anything longer is cut at an arbitrary frame, which is
-   * exactly what the previous 1400ms timeline produced — a logo frozen
-   * mid-zoom with its silver fill barely half-opaque.
+   * The longest intro endpoint in `Logo/miori_*xml` (the unfurl lands at 960;
+   * the draw at 620 and the fill at 900 before it). Android advises keeping a
+   * splash icon animation at or under ~1000ms; anything longer is cut at an
+   * arbitrary frame, which is exactly what the previous 1400ms timeline
+   * produced — a logo frozen mid-zoom with its silver fill barely half-opaque.
    *
-   * The plugin writes this into `windowSplashScreenAnimationDuration`, and the
-   * AVD's <b>idle pulse</b> starts where this ends and repeats forever, so a
-   * slow start never shows a still frame.
+   * The plugin writes this into `windowSplashScreenAnimationDuration`, the
+   * AVD's rim-light loop starts where this ends, and `app/_layout.tsx` REFUSES
+   * TO HIDE THE SPLASH UNTIL THIS HAS ELAPSED — so the intro is never truncated
+   * by a fast JS start (which is why the draw used to look like a flicker on a
+   * quick phone: fonts and settings were ready at ~300ms, and the native exit
+   * fade covered a half-drawn mark).
    */
-  nativeAnimationMs: 880,
+  nativeAnimationMs: 960,
   /**
    * The native splash's OWN exit fade, handed to `SplashScreen.setOptions`.
    *

@@ -780,8 +780,47 @@ check(
 check(
   'a moving clock lifts the load stage even without the first-frame event',
   /const pictureUp = firstFrame \|\| playbackProgress;/.test(screen) &&
-    /const stageUp = \(!pictureUp \|\| switchPending\)/.test(screen),
+    /const loadStageUp = \(!pictureUp \|\| switchPending \|\| resumeSeeking\)/.test(screen),
   'onFirstFrameRender can be missed (Expo Go, a VideoView remount), and the episode then plays behind a stage that never lifts'
+);
+check(
+  'a paused load keeps the cover and drops the bars, but never the ▶',
+  /const stageUp = loadStageUp && desiredPlayingRef\.current;/.test(screen) &&
+    /\{loadStageUp \? \(\s*<LoadingStage/.test(screen) &&
+    /off=\{switching \|\| stageUp \|\| transportCovered\}/.test(screen),
+  'tying the cover to intent left a pause during the scrape as chrome over a black frame with a 0:00 timeline, and tying it both ways would hide the one button that resumes'
+);
+
+check(
+  'a re-open of the same episode hides the transport with the rest of the chrome',
+  /setReopening\(openedEpRef\.current === epNum\)/.test(screen) &&
+    /const \[reopening, setReopening\] = useState\(false\)/.test(screen) &&
+    /const transportCovered = reopening && loadStageUp;/.test(screen),
+  'a quality or source change is a FETCH of the item already loaded — three transport buttons over the cover describe the item being replaced'
+);
+check(
+  'a re-open waits out the resume seek before it shows any chrome',
+  /resumeSeekIssuedAtRef\.current = now;[\s\S]{0,120}setResumeSeeking\(true\)/.test(screen) &&
+    /const loadStageUp = \(!pictureUp \|\| switchPending \|\| resumeSeeking\)/.test(screen),
+  'a replace renders the OPENING frame first and seeks back after it, so without this the transport appears over a player still jumping to where the viewer was'
+);
+check(
+  'a source pick is not undone by the remembered rung',
+  /sourceChosenRef\.current = true;/.test(screen) &&
+    /if \(sourceChosenRef\.current\) return;/.test(screen) &&
+    /sourceChosenRef\.current = false;/.test(screen),
+  'the applier seated the remembered height on the source that owns it and moved srcIndex back one commit after the pick — the sheet closed, the stream reloaded, and the chip still named the old source'
+);
+check(
+  'the keep-awake flag is written only when it changes',
+  /if \(awakeWrittenRef\.current === on\) return;/.test(screen) &&
+    !/player\.keepScreenOnWhilePlaying = screenAwake/.test(screen),
+  'expo-video ADDS an ExoPlayer listener on every write of `true` and can only remove the newest one (VideoPlayerKeepAwake), so a repeated write on the switch path leaks a listener that survives the screen'
+);
+check(
+  'the health tick stands down while an episode switch is pending',
+  /if \(mediaSwitchRef\.current\) return;/.test(screen),
+  'firstFrameRef is still the PREVIOUS episode during a switch, so the monitor read a parked playhead as a stall and reloaded the item being left'
 );
 check(
   'the health tick does nothing while the app is not in the foreground',
@@ -793,6 +832,16 @@ check(
   'the 120ms subtitle cue tick is gated the same way',
   /setInterval\([\s\S]{0,200}!appActiveRef\.current/.test(screen),
   'eight wake-ups a second to place cues on a picture nobody is looking at'
+);
+check(
+  'an error surface withdraws a queued episode advance',
+  /if \(error\) withdrawAdvance\(\);/.test(screen),
+  'the up-next card is drawn under the failure card, so a standing queue changes the episode the viewer is reading an error about'
+);
+check(
+  'a reconnect does not act while a switch is pending',
+  /wasOfflineRef\.current;[\s\S]{0,900}?if \(mediaSwitchRef\.current\) return;/.test(screen),
+  'sourcesRef still holds the item being left; reloading it arms pendingSeek from the WRONG episode'
 );
 check(
   'the tick runs on its OWN interval, not off `timeUpdate`',

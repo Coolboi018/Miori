@@ -28,9 +28,18 @@
  *
  *   4. "IT SITS STILL FOR 4-5 SECONDS." The intro is one-shot, so a slow cold
  *      start froze it on its last frame until JS hid the splash. The AVD must
- *      carry an infinitely repeating idle pulse that begins exactly where the
- *      intro ends — the native loading indicator, with no in-app overlay and no
- *      second hand-off.
+ *      carry an infinitely repeating idle animation that begins exactly where
+ *      the intro ends — the native loading indicator, with no in-app overlay and
+ *      no second hand-off. (25 Nov: it is a rim-light halo, not a scale/fill
+ *      pulse — see rule 5.)
+ *
+ *   5. "THE STROKE ANIMATION IS A BLINK, AND THE BREATHING LOOKS WRONG." Two
+ *      separate faults, both pinned below. The draw was 680ms and then a 2.5%
+ *      SCALE pulse took over, which on a mark this dense reads as jitter; the
+ *      idle is a thin rim light now and the artwork never moves at rest. And the
+ *      splash was hidden the moment fonts+settings were ready, so on a fast
+ *      phone the native exit fade covered a half-drawn mark — the intro is
+ *      960ms now, and nothing may hide the splash before it has elapsed.
  *
  * Offline: reads the XML/TS/JS files, samples the vector paths, no device.
  * Run with:  npx tsx scripts/check-splash.ts
@@ -161,17 +170,35 @@ const ink = sampleInk(pathData);
 
 /** Android's visible circle: 2/3 of the icon area, i.e. radius = 1/3 of 700. */
 const MASK_RADIUS = 700 / 3;
-/** The idle pulse's peak, from `Logo/miori_scale.xml`. */
-const PULSE_PEAK = 1.025;
+/**
+ * The largest scale any animator asks the group for, READ FROM THE ANIMATORS.
+ *
+ * This used to be a constant (1.025, the old breathing pulse), which meant the
+ * mask rule was checked against a number written in this file rather than
+ * against what the drawable actually does — and when the pulse was removed the
+ * constant would have kept the rule green for an animation that no longer
+ * existed. Deriving it makes the rule follow the artwork: re-introduce a bigger
+ * idle zoom and this fails with it.
+ */
+const PEAK_SCALE = Math.max(
+  1,
+  ...ANIMATOR_FILES.flatMap((file) =>
+    animators(file)
+      .filter((block) => /^scale[XY]$/.test(attr(block, 'propertyName') ?? ''))
+      .map((block) => numeric(block, 'valueTo', 1))
+  )
+);
 
 const fitBlock = /android:name="logo_fit"[\s\S]{0,500}?android:scaleX="([\d.]+)"/.exec(drawable);
 const fit = fitBlock ? Number(fitBlock[1]) : NaN;
 
 check('the drawable has a fit group around the artwork', Number.isFinite(fit), `fit=${fit}`);
 check(
-  'the artwork fits inside the 2/3 circle, even at the idle pulse peak',
-  ink.maxR * fit * PULSE_PEAK <= MASK_RADIUS,
-  `furthest ink ${(ink.maxR * fit * PULSE_PEAK).toFixed(1)} vs mask radius ${MASK_RADIUS.toFixed(1)}`
+  'the artwork fits inside the 2/3 circle at the animators’ own peak scale',
+  ink.maxR * fit * PEAK_SCALE <= MASK_RADIUS,
+  `furthest ink ${(ink.maxR * fit * PEAK_SCALE).toFixed(1)} vs mask radius ${MASK_RADIUS.toFixed(
+    1
+  )} at peak ${PEAK_SCALE}`
 );
 check(
   'the fit is not needlessly small — it fills at least 80% of the circle',
@@ -255,6 +282,51 @@ check(
   introEnd === SPLASH.nativeAnimationMs,
   `AVD ${introEnd}ms vs SPLASH ${SPLASH.nativeAnimationMs}ms`
 );
+
+// ⚠️ THE SHAPE OF THE INTRO, NOT ONLY ITS LENGTH. A splash can be 900ms and
+// still look like a slideshow: the old one drew the outline to completion and
+// only then faded the fill in. The choreography is one move — the silver rises
+// under a pen that is still travelling, and the stroke thins as it goes.
+{
+  const oneShot = (file: string, property: string) =>
+    animators(file).filter(
+      (block) => attr(block, 'propertyName') === property && attr(block, 'repeatCount') !== '-1'
+    );
+  const span = (block: string) => numeric(block, 'startOffset') + numeric(block, 'duration');
+
+  const drawEnd = Math.max(...oneShot('Logo/miori_stroke.xml', 'trimPathEnd').map(span));
+  const fillBlocks = oneShot('Logo/miori_fill.xml', 'fillAlpha');
+  const fillStart = Math.min(...fillBlocks.map((block) => numeric(block, 'startOffset')));
+
+  check(
+    'the silver starts rising while the outline is still drawing',
+    fillStart < drawEnd,
+    `fill @${fillStart}ms vs draw ends @${drawEnd}ms — two sequential moves read as a slideshow`
+  );
+  check(
+    '…and finishes after the draw, so the fill is not a flash under the pen',
+    Math.max(...fillBlocks.map(span)) >= drawEnd
+  );
+
+  const taper = oneShot('Logo/miori_stroke.xml', 'strokeWidth')[0] ?? '';
+  check(
+    'the stroke thins as it draws: a pen lifting, not a bar filling',
+    numeric(taper, 'valueFrom') > numeric(taper, 'valueTo'),
+    `width ${attr(taper, 'valueFrom')} -> ${attr(taper, 'valueTo')}`
+  );
+
+  const spin = oneShot('Logo/miori_scale.xml', 'rotation')[0] ?? '';
+  check(
+    'the mark lands level: the unfurl ends at rotation 0',
+    attr(spin, 'valueTo') === '0' && Math.abs(numeric(spin, 'valueFrom')) > 0,
+    'a rotation that does not settle at 0 leaves the logo crooked'
+  );
+  check(
+    'the settle ends at exactly 1:1, so nothing is left scaled or tilted',
+    oneShot('Logo/miori_scale.xml', 'scaleX').every((block) => numeric(block, 'valueTo', 0) === 1) &&
+      oneShot('Logo/miori_scale.xml', 'scaleY').every((block) => numeric(block, 'valueTo', 0) === 1)
+  );
+}
 {
   const plugin = read('plugins/withSplashAnimation.js');
   const declared = /ANIMATION_DURATION_MS\s*=\s*'(\d+)'/.exec(plugin)?.[1];
@@ -297,29 +369,67 @@ check(
 // ===========================================================================
 console.log('\n[native splash idle loop]');
 
-check('there is an infinitely repeating idle animation', looping.length >= 2, `${looping.length} looping animators`);
+// THE IDLE IS A RIM LIGHT, NOT A PULSE OF THE ARTWORK. The reported fault was
+// the old breathing: a 2.5% scale bump on a mark this dense reads as jitter, and
+// dimming the fill to 78% made the logo itself look like it was flickering. Both
+// are gone. What loops is the OUTLINE's alpha — a thin halo around a mark that
+// never changes brightness and never moves.
+const loopTargetsArtwork = ({ file, block }: { file: string; block: string }) =>
+  !file.includes('miori_stroke') || attr(block, 'propertyName') !== 'strokeAlpha';
+
+check(
+  'there is an infinitely repeating idle animation',
+  looping.length >= 1,
+  `${looping.length} looping animators`
+);
 check(
   'the idle loop begins exactly where the intro ends — no jump at the seam',
   looping.every(({ block }) => numeric(block, 'startOffset') === introEnd),
   looping.map(({ file, block }) => `${file}@${numeric(block, 'startOffset')}`).join(' ')
 );
 check(
-  'the idle loop runs on both the fill and the group, so the pulse reads as one motion',
-  looping.some(({ file }) => file.includes('miori_fill')) &&
-    looping.filter(({ file }) => file.includes('miori_scale')).length === 2
-);
-check(
-  'every looping animator is a reverse loop, so the pulse is seamless rather than a sawtooth',
+  'every looping animator is a reverse loop, so the breath is seamless rather than a sawtooth',
   looping.every(({ block }) => attr(block, 'repeatMode') === 'reverse')
 );
 check(
-  'the looping fill never dims so far that the logo reads as off',
-  looping.every(({ file, block }) => {
-    if (!file.includes('miori_fill')) return true;
-    const to = numeric(block, 'valueTo', 1);
-    return to >= 0.7 && to <= 0.9;
-  })
+  'the artwork itself never moves at rest: no loop targets the fill or the group',
+  looping.every((entry) => !loopTargetsArtwork(entry)),
+  looping.map(({ file, block }) => `${file}:${attr(block, 'propertyName')}`).join(' ')
 );
+check(
+  'MUTATION: the old fill-dim / scale pulse would FAIL that rule',
+  loopTargetsArtwork({
+    file: 'Logo/miori_fill.xml',
+    block: 'android:propertyName="fillAlpha" android:repeatCount="-1"',
+  }) &&
+    loopTargetsArtwork({
+      file: 'Logo/miori_scale.xml',
+      block: 'android:propertyName="scaleX" android:repeatCount="-1"',
+    })
+);
+check(
+  'the halo stays a halo: a shallow band, never off and never a flash',
+  looping.every(({ block }) => {
+    const from = numeric(block, 'valueFrom', 0);
+    const to = numeric(block, 'valueTo', 1);
+    return Math.min(from, to) >= 0.15 && Math.max(from, to) <= 0.6;
+  }),
+  looping.map(({ block }) => `${attr(block, 'valueFrom')}->${attr(block, 'valueTo')}`).join(' ')
+);
+{
+  // The seam, not just its position: the loop's first frame must be the value
+  // the settle left behind, or the halo snaps brighter/darker as it starts.
+  const settles = animators('Logo/miori_stroke.xml')
+    .filter((b) => attr(b, 'propertyName') === 'strokeAlpha' && attr(b, 'repeatCount') !== '-1')
+    .sort((a, b) => numeric(a, 'startOffset') - numeric(b, 'startOffset'));
+  const lastSettle = settles[settles.length - 1] ?? '';
+  const halo = animators('Logo/miori_stroke.xml').find((b) => attr(b, 'repeatCount') === '-1') ?? '';
+  check(
+    'the halo begins on the value the intro ended at — no brightness jump',
+    attr(lastSettle, 'valueTo') === attr(halo, 'valueFrom'),
+    `${attr(lastSettle, 'valueTo')} vs ${attr(halo, 'valueFrom')}`
+  );
+}
 
 // ===========================================================================
 // 5. Expo Go has no say in any of this — and must not have to print a warning
@@ -345,9 +455,41 @@ console.log('\n[Expo Go guard]');
   check('MUTATION: the old unguarded call would FAIL the guard check', !GUARD.test(UNGUARDED));
 }
 
+// ===========================================================================
+// 6. A FAST JS START MUST NOT CUT THE INTRO
+// ===========================================================================
+// The system never truncated this animation — WE did. `hideAsync` ran the moment
+// fonts and settings were ready (~300ms on a fast phone), and the native exit
+// fade covered a mark that was a third drawn. The intro is 960ms, so the hide
+// has to wait out whatever is left of it.
+console.log('\n[the intro cannot be truncated]');
+{
+  const layout = read('app/_layout.tsx');
+  check(
+    'the splash is not hidden before the intro has finished',
+    /SPLASH\.nativeAnimationMs\s*-\s*\(Date\.now\(\)\s*-\s*LAUNCH_AT\)/.test(layout),
+    'hiding on readiness alone started the exit fade over a half-drawn mark'
+  );
+  check(
+    '…measured from a timestamp captured at module scope, not a re-render',
+    /const LAUNCH_AT = Date\.now\(\);/.test(layout)
+  );
+  check(
+    '…and only on Android, where the animated icon exists',
+    /Platform\.OS !== 'android'/.test(layout) && /isRunningInExpoGo\(\)/.test(layout),
+    'Expo Go plays no AVD and iOS has no animated icon — holding those is a bare delay'
+  );
+  // The rule has to be able to fail: the old effect, verbatim.
+  const OLD = "useEffect(() => {\n  if (!fontsReady || !settingsReady) return;\n  if (Platform.OS === 'web') return;\n  void SplashScreen.hideAsync();\n}, [fontsReady, settingsReady]);";
+  check(
+    'MUTATION: the old hide-on-ready effect would FAIL the rule',
+    !/SPLASH\.nativeAnimationMs\s*-\s*\(Date\.now\(\)\s*-\s*LAUNCH_AT\)/.test(OLD)
+  );
+}
+
 console.log(
   failures
     ? `\n${failures} failed\n`
-    : '\nall passed — the splash logo is complete inside Android’s circular mask, finishes before the animation budget, shows the finished mark when the animation is skipped, keeps breathing while a slow device starts, and does not make Expo Go warn about a screen it cannot customise\n'
+    : '\nall passed — the splash logo is complete inside Android’s circular mask, finishes inside the animation budget, shows the finished mark when the animation is skipped, draws and fills as one move, breathes with a rim light instead of pulsing the artwork, is never cut by a fast JS start, and does not make Expo Go warn about a screen it cannot customise\n'
 );
 process.exit(failures ? 1 : 0);

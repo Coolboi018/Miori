@@ -88,6 +88,18 @@ export const unstable_settings = {
 SplashScreen.preventAutoHideAsync();
 
 /**
+ * WHEN THIS MODULE STARTED EVALUATING — the reference point for the launch
+ * intro's minimum on-screen time.
+ *
+ * Module scope, not state: it must be older than every effect and must not be
+ * reset by a re-render or a Fast Refresh. JS only starts after the splash
+ * window is already up, so this timestamp is never EARLIER than the AVD's own
+ * start — which is what makes "wait out the remainder" a guarantee that the
+ * icon animation has finished rather than a guess.
+ */
+const LAUNCH_AT = Date.now();
+
+/**
  * THE NATIVE SPLASH FADES OUT IN 200ms, NOT THE LIBRARY'S 400ms.
  *
  * `SplashScreenManager.kt` runs its own exit fade over `duration` while it is
@@ -310,11 +322,34 @@ export default function RootLayout() {
   /**
    * NATIVE-ONLY SPLASH (Gmail/ChatGPT style): hide the native splash once the
    * app is ready; its own native fade carries the transition. No in-app overlay.
+   *
+   * ⚠️ AND NOT BEFORE THE ICON ANIMATION HAS FINISHED (25 Nov).
+   *
+   * The AVD in `Logo/` runs a 960ms intro, but this effect used to fire the
+   * moment fonts and settings were ready — on a fast phone that is ~300ms, so
+   * the splash began its 200ms exit fade over a mark that was 30% drawn. That is
+   * what "the stroke animation is only a blink, and it does not look good" was:
+   * the animation was never truncated by the system, it was truncated by us.
+   *
+   * So the hide waits out whatever is left of `SPLASH.nativeAnimationMs`. The
+   * splash is a launch animation the user is meant to see, not a stall to hide —
+   * and the wait is only the remainder, so a genuinely slow start (fonts or
+   * settings arriving after the intro) pays nothing at all.
+   *
+   * Expo Go and iOS are exempt on purpose: Expo Go plays no AVD whatsoever, and
+   * iOS has no animated splash icon, so holding those would be a bare delay with
+   * nothing on screen to justify it.
    */
   useEffect(() => {
     if (!fontsReady || !settingsReady) return;
     if (Platform.OS === 'web') return;
-    void SplashScreen.hideAsync();
+    if (isRunningInExpoGo() || Platform.OS !== 'android') {
+      void SplashScreen.hideAsync();
+      return;
+    }
+    const remaining = Math.max(0, SPLASH.nativeAnimationMs - (Date.now() - LAUNCH_AT));
+    const timer = setTimeout(() => void SplashScreen.hideAsync(), remaining);
+    return () => clearTimeout(timer);
   }, [fontsReady, settingsReady]);
 
   const showApp = fontsReady && settingsReady;

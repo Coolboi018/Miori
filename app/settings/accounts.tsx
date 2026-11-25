@@ -19,6 +19,7 @@ import {
   getDiscordToken,
   isPresenceEnabled,
   logoutDiscordSession,
+  readPresenceChoice,
   setPresenceEnabled,
   type DiscordUser,
 } from '@/lib/presence/discord';
@@ -58,9 +59,11 @@ export default function AccountsSettings() {
       const dtoken = await getDiscordToken();
       setDuser(dtoken ? await fetchDiscordUser(dtoken).catch(() => null) : null);
       if (dtoken) {
-        let on = await isPresenceEnabled();
-        if (!on) { await setPresenceEnabled(true); on = true; }
-        setPresenceOn(on);
+        // The same rule as the gateway host: a stored CHOICE wins, and only a
+        // session with no choice at all is migrated to on. (`isPresenceEnabled`
+        // alone cannot tell that apart — see `readPresenceChoice`.)
+        if ((await readPresenceChoice()) === null) await setPresenceEnabled(true);
+        setPresenceOn(await isPresenceEnabled());
       } else {
         setPresenceOn(false);
       }

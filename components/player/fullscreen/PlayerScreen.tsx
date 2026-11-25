@@ -348,6 +348,22 @@ const BOTTOM_BAR_H = CHROME_BOTTOM_BAR_H;
  */
 const UNKNOWN_HEALTH = { kind: 'unknown' } as const;
 
+/**
+ * How long the next resolve waits for the previous one.
+ *
+ * A switch during a resolving episode used to leave BOTH resolves probing the
+ * same hosts: the episode being left kept its 25s+30s window running while the
+ * new one started its own, so a slow connection got the traffic of two searches
+ * and every wrong answer twice. One resolve at a time fixes the common case for
+ * free (the old one has usually settled by the time the viewer presses next).
+ *
+ * The cap is what makes it safe: a resolve can leak (third-party calls have
+ * their own deadlines but a promise can still never settle), and an unbounded
+ * queue would then hand that stall to the next episode. After this long the new
+ * attempt starts anyway — bounded overlap beats a frozen open.
+ */
+const RESOLVE_HANDOFF_MS = 6_000;
+
 // THE SOURCE-KIND AND ROUTE RULES now live in `lib/player/source.ts`.
 //
 // `contentTypeFor` / `labelAgrees` / `labelDisagrees` and `paramNumber` /
@@ -423,6 +439,16 @@ export default function LandscapePlayer() {
    * which may still be in flight when the card is queued.
    */
   const [upNext, setUpNext] = useState<number | null>(null);
+  /**
+   * The queued episode, readable from the `timeUpdate` listener.
+   *
+   * The listener is registered once per media item (`[player, animeId, epNum, …]`)
+   * and must not grow a dependency on this state, or every card tick would
+   * rebuild the whole listener battery. The ref is the same contract as
+   * `autoAdvanceRef` and `desiredPlayingRef`.
+   */
+  const upNextRef = useRef<number | null>(null);
+  upNextRef.current = upNext;
   const onBarMeasure = useCallback((h: number) => {
     // Sub-point rounding on the safe area would otherwise re-render the chrome
     // for a height nobody can see.
@@ -616,6 +642,25 @@ export default function LandscapePlayer() {
    * ExoPlayer's extractor give up silently.
    */
   const [firstFrame, setFirstFrame] = useState(false);
+
+  /**
+   * HAS THIS EPISODE ALREADY BEEN HANDED TO THE PLAYER?
+   *
+   * The cover hides the bars (`controlsOff`), and the transport is a separate
+   * decision on purpose: it stays visible through a PAUSED load so an episode
+   * opened paused is not a cover with no way to start. That is right for the
+   * FIRST open of an episode and wrong for every re-open of the same one — a
+   * quality or source change is a fetch of the item already loaded, and three
+   * transport buttons over the cover describe the item being replaced, exactly
+   * as they would during a switch.
+   *
+   * `openedEpRef` is the episode the player was last handed; `reopening` says
+   * the open in flight is a re-open of it. Set in ONE place — where the replace
+   * is issued — so a quality pick, a source pick, a reload and a reconnect all
+   * get the same answer.
+   */
+  const openedEpRef = useRef<number | null>(null);
+  const [reopening, setReopening] = useState(false);
   const [videoViewRevision, setVideoViewRevision] = useState(0);
   /** Read by the frame watchdog, which lives outside the render cycle. */
   const firstFrameRef = useRef(false);
@@ -643,6 +688,34 @@ export default function LandscapePlayer() {
    * being read as the app forgetting where it was.
    */
   const [resumeSettled, setResumeSettled] = useState(false);
+
+  /**
+   * THE RESUME SEEK IS PART OF THE LOAD, NOT OF THE PLAYBACK.
+   *
+   * The cover lifts on the first frame that arrives — and a media item
+   * renders its OPENING frame, not the one the viewer left. The playhead is
+   * put back a moment later, when `readyToPlay` runs `applyResumePosition`,
+   * and that seek is by definition into territory this connection has not
+   * fetched. Between the two events the chrome has appeared over a frozen
+   * frame at 0:00 with ▶ on it, which is the "the fetching UI goes, the
+   * player comes, then it seeks to my position" the viewer reported after
+   * every quality and source change.
+   *
+   * While this is true the cover stays, so the first thing drawn is the
+   * episode where they left it. Bounded twice: cleared by the first
+   * `timeUpdate` after the seek (the same evidence the seek ring uses), and
+   * by a hard timeout regardless — a seek that never answers is the stall
+   * monitor's problem, not a reason to keep a cover over a working player.
+   */
+  const [resumeSeeking, setResumeSeeking] = useState(false);
+  const resumeSeekIssuedAtRef = useRef(0);
+  useEffect(() => {
+    if (!resumeSeeking) return;
+    // Longer than any resume seek worth waiting for, short enough that a
+    // stalled one cannot hide a player the viewer may want to pause.
+    const id = setTimeout(() => setResumeSeeking(false), 4000);
+    return () => clearTimeout(id);
+  }, [resumeSeeking]);
 
   // --- Buffer health ------------------------------------------------------
   /**
@@ -866,6 +939,12 @@ export default function LandscapePlayer() {
    * note at the `source` object.
    */
   const recoveryOpenRef = useRef(false);
+  /**
+   * THE RESOLVE IN FLIGHT. See `RESOLVE_HANDOFF_MS`; the load waits on this (at
+   * most that long) before starting its own, so two episodes' searches never
+   * run against the same hosts at once.
+   */
+  const resolveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   /** Source URLs this episode has already been judged silent on. Once each. */
   const silentUrlsRef = useRef<Set<string>>(new Set());
   /** Silent-source hops spent this episode. Bounded by MAX_SILENT_HOPS. */
@@ -980,6 +1059,13 @@ export default function LandscapePlayer() {
     frameWatchdogRef.current = setTimeout(() => {
       frameWatchdogRef.current = null;
       if (firstFrameRef.current) return;
+      /**
+       * A WATCHDOG FOR AN ITEM THAT IS BEING REPLACED MUST NOT FIRE — see the
+       * health tick. It was armed by the previous episode's replace; letting it
+       * finish would `failover` (or remount the VideoView) at the exact moment
+       * the new item is being prepared. The new replace arms a fresh window.
+       */
+      if (mediaSwitchRef.current) return;
       // OFFLINE IS NOT A DEAD SOURCE. The window exists to write off a source
       // that cannot render; a phone with no radio has not told us anything
       // about the source at all. Mark the blocked attempt and let the reconnect
@@ -1220,6 +1306,9 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // this is the seek that would fail the episode over on a slow connection.
       const now = Date.now();
       healthRef.current = noteSeek(readHealth(now), now);
+      // THE COVER STAYS FOR THIS SEEK — see `resumeSeeking`.
+      resumeSeekIssuedAtRef.current = now;
+      setResumeSeeking(true);
       player.currentTime = resumeAt;
       // Mirror the target immediately: a cue list that lands a moment later
       // reads `positionRef`, and the 0 a replace left there would briefly be
@@ -1505,6 +1594,23 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    */
   const qualityChosenRef = useRef(false);
   /**
+   * HAS THE VIEWER PICKED A SOURCE THIS ATTEMPT?
+   *
+   * The rung applier below is an OPEN-time rule: an episode should start on
+   * the server that owns the remembered height even when the walk picked
+   * another one. After an explicit pick that rule is actively wrong — the
+   * pick would be undone one commit later by a seat on whichever source
+   * happens to own the rung, and the viewer sees the sheet close, the stream
+   * reload and the chip still naming the old source. That was the 25 Nov
+   * report: "picked 3/7, it reloaded and still said 1/7; picked 3/7 again and
+   * it worked" — the second pick stuck because by then the destination had a
+   * ladder, so `qualityForSource` had handed the pick a seat of its own.
+   *
+   * Set by a source pick and by the error card's Change source; cleared by a
+   * fresh resolve, exactly like `qualityChosenRef`.
+   */
+  const sourceChosenRef = useRef(false);
+  /**
    * The rung that last actually PLAYED for this anime (`miori:qPref:{id}`).
    *
    * Read once per open (in `load`, alongside the source memory) and kept in a
@@ -1526,6 +1632,32 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * manual scrub has already left the parked state behind.
    */
   const endedRef = useRef(false);
+  /**
+   * WITHDRAW THE QUEUED NEXT-EPISODE ADVANCE.
+   *
+   * The 5s card is the "the viewer did nothing" state. Everything else — a
+   * scrub, a double-tap back, pressing ▶ again, skip-back, picking another
+   * episode — is the viewer making a decision, and a decision is precisely what
+   * the countdown must not overrule. Before this existed the only way out was
+   * Cancel: the card kept counting through a rewind and changed the episode
+   * under a viewer who had just chosen to stay.
+   *
+   * ONE RULE, FOUR CALLERS (a playhead tick, every seek, the scrub grip, and
+   * ▶). The tick alone was not enough: a seek issued against an ended item does
+   * not reliably produce a `timeUpdate` while the engine sits paused, so the
+   * most likely rewind of all — dragging the timeline back from the end — was
+   * the one case it could miss. `seekWithGrace` is the funnel every viewer seek
+   * already passes through, which is why the decision lives there too.
+   *
+   * `endedRef` drops with it: after a rewind the transport's ▶ is a resume, not
+   * the restart-from-zero tap the ended state arms.
+   */
+  const withdrawAdvance = useCallback(() => {
+    if (upNextRef.current == null) return;
+    upNextRef.current = null;
+    setUpNext(null);
+    endedRef.current = false;
+  }, []);
   /**
    * One-shot guard for the resume seek. See the `readyToPlay` listener for why
    * re-applying it on every readiness is an infinite seek loop.
@@ -1612,6 +1744,18 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * for the new item starts.
    */
   const mediaSwitchRef = useRef(false);
+  /**
+   * WHAT IS ACTUALLY OPEN, as the tuple that opened it.
+   *
+   * The source effect's last successful `replaceAsync`: which episode, which
+   * URI, which reload, which source index. An effect run that matches all four
+   * has nothing to replace — and the arrival of a quality rung is exactly such a
+   * run. See the guard at the top of the effect.
+   */
+  const committedEpRef = useRef(-1);
+  const committedUrlRef = useRef<string | null>(null);
+  const committedNonceRef = useRef(-1);
+  const committedSrcRef = useRef(-1);
   /**
    * THE SWITCH GATE — `mediaSwitchRef` fences WRITES, this fences TOUCHES.
    *
@@ -1726,50 +1870,6 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * original site for what the top/bottom split is for.
    */
   // visibility is store-driven now
-
-  /**
-     * ⚠️ THE GESTURE WRITES NOTHING TO THE PLAYER, AND THAT IS THE WHOLE FIX.
-     *
-     * There used to be ~120 lines here: a `ScrubState` ref, an `applyScrub` that
-     * wrote `scrubbingModeOptions` and paused on iOS, an `onScrubPhase` that four
-     * call sites had to remember, and two effects that existed to clean up after
-     * gestures that died. All of it existed to satisfy one rule — whatever a drag
-     * writes, some other path must write it back — and the rule cost two crashes,
-     * a frozen picture on both platforms, and a drag that silently issued no seek.
-     *
-     *   1. `scrubbingModeEnabled: true` SUPPRESSES PLAYBACK on Android (the SDK
-     *      says so in the property's own doc comment), and iOS was paused
-     *      explicitly, as the SDK also recommends. So on BOTH platforms the frame
-     *      under the viewer's finger stopped moving for the whole drag while the
-     *      audio ran on. That is the "no smooth playback on drag" report, and it
-     *      is indistinguishable from a network fault because it looks exactly
-     *      like one.
-     *   2. Writing to the player from a cleanup crashed twice — once because
-     *      `useVideoPlayer` had already released the native player, and once
-     *      because `ProgressBar` reported its own unmount on the strength of an
-     *      ordering ("children unmount before parents") that React does not
-     *      guarantee and the device disproved. Both were attempts to end a drag
-     *      from somewhere other than the gesture.
-     *   3. The commit seek ran at the viewer's RESTING tolerance, not the widened
-     *      one. `setScrubbing` turned the mode off synchronously and the seek was
-     *      dispatched after it, so with the default `exact` precision ExoPlayer
-     *      decoded forward from the preceding keyframe and discarded frames to
-     *      reach the target. That is the "the video restarts" report.
-     *
-     * A drag now touches the player zero times. `ProgressBar` keeps its own visual
-     * drag state and commits exactly one seek on release — at the widened
-     * tolerance, restored in the same tick. All this screen does is keep the bar
-     * MOUNTED while that is happening, so the 3s auto-hide cannot pull it out
-     * from under a finger that is still down.
-     *
-     * There is deliberately still NO unmount reset here, and the reason is now a
-     * simpler one than it was: **there is nothing on the player to reset.** A
-     * teardown that ran after `release()` could not have helped anyway — the
-     * native player it would have written to no longer exists.
-     */
-    const onScrubActive = useCallback((active: boolean) => {
-      setScrubActive(active);
-  }, []);
 
   /**
    * A track landing publishes at the CURRENT playhead — through `showCueAt`,
@@ -1902,6 +2002,84 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     showControlsRef.current = next;
     setChromeVisible(next);
   }, [menu, panelOpen, locked]);
+
+  /**
+   * ⚠️ THE GESTURE WRITES NOTHING TO THE PLAYER, AND THAT IS THE WHOLE FIX.
+   *
+   * There used to be ~120 lines here: a `ScrubState` ref, an `applyScrub` that
+   * wrote `scrubbingModeOptions` and paused on iOS, an `onScrubPhase` that four
+   * call sites had to remember, and two effects that existed to clean up after
+   * gestures that died. All of it existed to satisfy one rule — whatever a drag
+   * writes, some other path must write it back — and the rule cost two crashes,
+   * a frozen picture on both platforms, and a drag that silently issued no seek.
+   *
+   *   1. `scrubbingModeEnabled: true` SUPPRESSES PLAYBACK on Android (the SDK
+   *      says so in the property's own doc comment), and iOS was paused
+   *      explicitly, as the SDK also recommends. So on BOTH platforms the frame
+   *      under the viewer's finger stopped moving for the whole drag while the
+   *      audio ran on. That is the "no smooth playback on drag" report, and it
+   *      is indistinguishable from a network fault because it looks exactly
+   *      like one.
+   *   2. Writing to the player from a cleanup crashed twice — once because
+   *      `useVideoPlayer` had already released the native player, and once
+   *      because `ProgressBar` reported its own unmount on the strength of an
+   *      ordering ("children unmount before parents") that React does not
+   *      guarantee and the device disproved. Both were attempts to end a drag
+   *      from somewhere other than the gesture.
+   *   3. The commit seek ran at the viewer's RESTING tolerance, not the widened
+   *      one. `setScrubbing` turned the mode off synchronously and the seek was
+   *      dispatched after it, so with the default `exact` precision ExoPlayer
+   *      decoded forward from the preceding keyframe and discarded frames to
+   *      reach the target. That is the "the video restarts" report.
+   *
+   * A drag now touches the player zero times. `ProgressBar` keeps its own visual
+   * drag state and commits exactly one seek on release — at the widened
+   * tolerance, restored in the same tick. All this screen does is keep the bar
+   * MOUNTED while that is happening, so the 3s auto-hide cannot pull it out
+   * from under a finger that is still down.
+   *
+   * There is deliberately still NO unmount reset here, and the reason is now a
+   * simpler one than it was: **there is nothing on the player to reset.** A
+   * teardown that ran after `release()` could not have helped anyway — the
+   * native player it would have written to no longer exists.
+   */
+  const onScrubActive = useCallback(
+    (active: boolean) => {
+      if (active) {
+        // A FINGER ON THE TIMELINE IS ALREADY A DECISION. The commit seek comes
+        // on release, seconds later — long enough for a 5s countdown to fire
+        // mid-drag. Withdraw on the grip, not only on the seek.
+        withdrawAdvance();
+        // ⚠️ AND THE CHROME STAYS UP FOR THE WHOLE DRAG.
+        //
+        // The 3s auto-hide is a "the viewer stopped interacting" timer, and a
+        // finger held on the timeline is the opposite of quiet. It used to
+        // fire mid-drag: the whole overlay faded out — the top bar, the
+        // gradient, and the bar the finger was on — and because a hidden bar
+        // is touch-transparent, the gesture was cancelled with it. The knob
+        // snapped back and no seek was committed at all, so a long hold read
+        // as "the player reloaded".
+        //
+        // Every path that hides the chrome runs through `hideTimerRef`
+        // (`pokeControls`, `toggleControls`, the mount effect), so clearing
+        // it here and arming nothing holds the overlay up for as long as the
+        // finger is down. The release branch re-arms the SAME countdown every
+        // other interaction uses, so the chrome still goes away 3s after the
+        // finger lifts rather than staying up because a drag once happened.
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+        showControlsRef.current = true;
+        setChromeVisible(true);
+      } else {
+        // POKE, not a bare re-arm: it restores the chrome if a switch or a
+        // panel hid it during the drag, and it keeps ONE definition of
+        // "3s of quiet, then hide" for the whole screen.
+        pokeControls();
+      }
+      setScrubActive(active);
+    },
+    [withdrawAdvance, pokeControls]
+  );
 
   useEffect(() => {
     if (menu || panelOpen || locked) {
@@ -2075,6 +2253,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       );
       setQualitySel(null);
       qualityChosenRef.current = false;
+      sourceChosenRef.current = false;
       refreshedRef.current = new Set();
       // The chrome has something to show even if the metadata request is slow
       // or the connection is thin: the persisted payload the details page (or
@@ -2160,6 +2339,8 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // resolve produced (a wrap-round failure rebuilds the list and must
         // not silently demote the viewer to Auto forever).
         qualityChosenRef.current = false;
+        // …and the viewer has not picked a source on this list yet.
+        sourceChosenRef.current = false;
         setVariantsBySource({});
         // THE LIST THAT IS ABOUT TO LOAD IS THE RETURN TRIP'S CACHE. One write
         // site — the same one every fresh resolve flows through — so the cache
@@ -2267,13 +2448,36 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // (every extension probed for this episode) is not repeated for a list
       // this device resolved minutes ago.
       if (!cached) {
-        const resolvePromise = resolveEpisode(probeReg, animeId, epNum, m.idMal ?? null, {
-          // Search-keyword sources (anikoto family) map anilist id via keyword
-          // + catalog-id equality; romaji first (closest to MAL titles).
-          titles: [m.title?.romaji, m.title?.english].filter(
-            (t): t is string => !!t && t.length >= 3
+        /**
+         * ONE RESOLVE AT A TIME — see `RESOLVE_HANDOFF_MS`.
+         *
+         * Both outcomes are failures: the previous resolve settles (the normal
+         * case, and the wait is then a microtask), or the cap expires and this
+         * one starts anyway. Neither can leave the viewer waiting on the other
+         * episode's traffic, and neither can queue behind a promise that never
+         * settles.
+         */
+        const handoff = Promise.race([
+          resolveChainRef.current.then(
+            () => undefined,
+            () => undefined
           ),
-        });
+          new Promise<undefined>((resolve) => {
+            setTimeout(() => resolve(undefined), RESOLVE_HANDOFF_MS);
+          }),
+        ]);
+        const resolvePromise = handoff.then(() =>
+          resolveEpisode(probeReg, animeId, epNum, m.idMal ?? null, {
+            // Search-keyword sources (anikoto family) map anilist id via keyword
+            // + catalog-id equality; romaji first (closest to MAL titles).
+            titles: [m.title?.romaji, m.title?.english].filter(
+              (t): t is string => !!t && t.length >= 3
+            ),
+          })
+        );
+        // Held whether it resolves or rejects: a rejection is an answer, and it
+        // must not keep the next attempt waiting for a promise that is over.
+        resolveChainRef.current = resolvePromise.catch(() => undefined);
         const verdict = await resolveInTwoWindows(resolvePromise, 'No source answered in time');
         if (verdict.kind === 'failed') throw verdict.error;
         const resolved = verdict.value;
@@ -2383,7 +2587,19 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // only live controls left on the card, and a gate that outlived its resolve
     // would keep them behind a spinner that is no longer loading anything.
     if (error) setSwitchPending(false);
-  }, [error, player]);
+    // AND THE COUNTDOWN MUST NOT OUTLIVE AN ERROR. The card is drawn under the
+    // failure surface, so a queue left standing there would change the episode
+    // while the viewer is looking at an error about the current one.
+    if (error) withdrawAdvance();
+    /**
+     * AN ERROR ENDS THE SWITCH WINDOW. The new item will never land, so keeping
+     * `mediaSwitchRef` set would leave every automatic remedy disabled for the
+     * episode that follows (Retry, Change source and the reconnect path all go
+     * through the same guards). The error card is the new state; the fence's job
+     * was to protect a hand-over that is no longer happening.
+     */
+    if (error) mediaSwitchRef.current = false;
+  }, [error, player, withdrawAdvance]);
 
   // PiP support is read synchronously at initialisation above — see `pipSupported`.
 
@@ -2452,6 +2668,23 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   }, [resumeAt]);
 
   const failover = useCallback((reason?: string) => {
+    /**
+     * ═══ THE ITEM BEING LEFT IS NOT THE EPISODE BEING OPENED (25 Nov) ═══
+     *
+     * This is the hole the "hiccup, then the NEXT episode crashed" report
+     * points at. `goToEpisode` pauses the old item and sets `mediaSwitchRef`;
+     * from that instant until the new list lands, the sources in state are still
+     * the PREVIOUS episode's. Every automatic remedy that runs in that window
+     * therefore operates on the wrong item: a hop `replaceAsync`es the episode
+     * being left (which the viewer is not watching), and it does so WHILE the
+     * switch's own replace is preparing on a connection that is already slow —
+     * two native prepares, the exact shape that blocks the main thread.
+     *
+     * A failure reported by the dying item is also not evidence about the
+     * episode being opened, so there is nothing here worth acting on. The new
+     * item arms its own watchdog and starts its own stretch.
+     */
+    if (mediaSwitchRef.current) return;
     if (offlineRef.current) {
       offlineBlockedRef.current = true;
       clearFrameWatchdog();
@@ -2667,6 +2900,14 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    */
   const recoverStream = useCallback(
     (ahead: number | null, frozenMs: number, growing: boolean) => {
+      /**
+       * A SWITCH IS NOT A STALL — see `failover`. This is the second half of the
+       * same rule: the tick can reach here with the old item's frozen playhead
+       * and the viewer's play intent, and answer `reload` by bumping
+       * `reloadNonce`, which re-opens the episode being LEFT. Guarding the tick
+       * alone would leave every other caller with the same hole.
+       */
+      if (mediaSwitchRef.current) return;
       if (offlineRef.current) {
         // No radio is not a slow CDN. Mark the attempt so the reconnect path
         // reopens it, and do not spend a single remedy on it.
@@ -2731,7 +2972,67 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       setSwitchPending(false);
       return;
     }
+
+    /**
+     * WHICH RUNG, AND WHICH URL — decided BEFORE anything is reset, because the
+     * answer also says whether this run has anything to replace at all.
+     */
+    const sel = qualitySel;
+    const list = sel ? variantsBySource[sel.src] : undefined;
+    const picked = sel && sel.src === srcIndex ? list?.[sel.v] : undefined;
+    const separateAudio = !!list?.length && list[0]?.separateAudio === true;
+    /**
+     * IS THIS THE ITEM ALREADY PLAYING? Same episode, same source, same reload.
+     * The only run that can match is one caused by `qualitySel` or the variants
+     * arriving from the gather — a VIEWER's pick always bumps `reloadNonce`.
+     */
+    const sameAttempt =
+      committedEpRef.current === epNum &&
+      committedNonceRef.current === reloadNonce &&
+      committedSrcRef.current === srcIndex;
+    /**
+     * A RUNG THAT ARRIVES ON ITS OWN IS A CEILING, NOT A NEW URL (25 Nov).
+     *
+     * The remembered height used to land as a SECOND `replaceAsync` a second or
+     * two after a switch: the episode opened on the master (the new item's
+     * ladder is not known yet), the gather landed, the applier seated the rung,
+     * and this effect re-ran with a variant URL — a fresh native prepare, a
+     * visible re-buffer, and the one remaining window in which two prepares
+     * could overlap. It was never a different item.
+     *
+     * On a master that carries its own audio the rung is already applied that
+     * way (a ceiling, see below). For everything else the same answer works: cap
+     * `maxResolution` and let the player re-select its track, which is what a
+     * real player does when a quality is locked mid-item. A ladder with no
+     * heights has nothing to cap on, so that case keeps the variant URL and the
+     * replace it needs.
+     */
+    const ceilingOnly = !!picked && (separateAudio || (sameAttempt && capFor(picked) != null));
+    const variantUrl = picked && !ceilingOnly ? picked.url : undefined;
+    const targetUrl = variantUrl ?? s.url;
+    if (sameAttempt && committedUrlRef.current === targetUrl) {
+      // Nothing to open. `maxResolution` is the whole answer — the cap for a
+      // rung, `null` for Auto, which is the one write that makes the item the
+      // viewer is already watching stop being capped.
+      try {
+        player.maxResolution = ceilingOnly ? capFor(picked) : null;
+      } catch {
+        /* the native player may already be released */
+      }
+      return;
+    }
     let cancelled = false;
+    /**
+     * WAS THIS OPEN AN EPISODE SWITCH?
+     *
+     * `mediaSwitchRef` is cleared two lines below — it has to be, because every
+     * progress write from here on belongs to the item arriving — but the answer
+     * is needed again further down, when the media source is built. An episode
+     * switch is the ONE open that happens while the item being left may still
+     * have a segment in flight, which is exactly the window the disk cache's
+     * main-thread lock turns into a killed app (see `useCaching`).
+     */
+    const episodeSwitch = mediaSwitchRef.current;
     // A new media item is here, so any episode switch is over: the playhead
     // from here on belongs to `epNum`. A layout effect, so this lands before
     // the replace is issued and before a tick of the new item can be filed.
@@ -2769,6 +3070,25 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // through `videoTrackChange`; until it does, the quality row must not keep
     // claiming the rung the last episode happened to render.
     setLiveHeight(null);
+    /**
+     * THREE FLAGS THAT DESCRIBE A REQUEST, NOT AN EPISODE.
+     *
+     * Left set across a switch they all lie about the item arriving:
+     *   • `seekPending` puts a seek ring over an item nobody has seeked;
+     *   • `recovering` makes the stage say "Reconnecting…" for a switch that
+     *     never failed — the phase would describe the previous episode's stall;
+     *   • `scrubActive` keeps the bar mounted (and the scrim up) for a finger
+     *     that was on a timeline belonging to the episode being left.
+     * `seekIssuedAtRef` is the same statement in ref form; the post-seek ring
+     * never clears itself without a `timeUpdate`, so a seek into an item that
+     * never starts would leave it armed forever.
+     */
+    setSeekPending(false);
+    setRecovering(false);
+    setResumeSeeking(false);
+    resumeSeekIssuedAtRef.current = 0;
+    setScrubActive(false);
+    seekIssuedAtRef.current = 0;
     frameRecoveryUsedRef.current = false;
     // A new media item owes us a new first frame. Leaving the old `true` in
     // place would let the spinner stay dismissed across a switch that is about
@@ -2793,13 +3113,8 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     // the rung is applied as an ABR CEILING instead: the item stays the master,
     // the audio keeps arriving, the buffer survives, and Android re-selects its
     // own track under the cap.
-    const sel = qualitySel;
-    const list = sel ? variantsBySource[sel.src] : undefined;
-    const picked = sel && sel.src === srcIndex ? list?.[sel.v] : undefined;
-    const separateAudio = !!list?.length && list[0]?.separateAudio === true;
-    const variantUrl = picked && !separateAudio ? picked.url : undefined;
     try {
-      player.maxResolution = separateAudio ? capFor(picked) : null;
+      player.maxResolution = ceilingOnly ? capFor(picked) : null;
     } catch {
       /* the native player may already be released */
     }
@@ -2835,8 +3150,32 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // Two quiet minutes is the recovery window: long enough to cover a stuck
       // segment's retries, short enough that a normal pick later in the episode
       // keeps the cache the viewer asked for.
+      /**
+       * ⚠️ AN EPISODE SWITCH NEVER TAKES THE DISK CACHE (25 Nov).
+       *
+       * The 1.0.9 freeze fix covered RECOVERY re-opens, and that was not the
+       * whole set. "Next episode" is the same shape and was left uncovered: the
+       * item being left is paused but its segment download is very much still
+       * alive, and `prepare()` for the new source runs on the Android MAIN
+       * thread (`VideoModule.replaceImpl` → `appContext.mainQueue`). With the
+       * cache on, that path takes `CacheVariantIndex`'s `@Synchronized` lock and
+       * reads a file, while the cache's network interceptor is holding the same
+       * lock on the dying download — the UI thread blocks, the picture stops,
+       * the scrub spinner stops, and Android closes the app.
+       *
+       * That is the reported shape of the episode-advance crash: it happens
+       * WHEN THE SCRAPE STAGE COMES UP (the first frame of the new item is
+       * being prepared), it is INTERMITTENT (it needs a download to be in
+       * flight at that instant), it hits MANUAL next as well as the countdown
+       * (both go through `goToEpisode`), and the FIRST episode of a session is
+       * fine (there is no previous item to be downloading).
+       *
+       * A switch is a transition, and a transition goes straight to the
+       * network. The viewer's own opens keep whatever they configured.
+       */
       useCaching:
         !recoveryOpenRef.current &&
+        !episodeSwitch &&
         Platform.OS === 'android' &&
         readSetting('player.cache') !== 'off' &&
         !stallRecent,
@@ -2884,6 +3223,19 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     recoveryOpenRef.current = false;
     frameWatchdogStretchRef.current = 0;
     armFrameWatchdog();
+    // Recorded BEFORE the native call: these four are what the guard at the top
+    // of this effect compares against, and a `replaceAsync` that throws must
+    // still leave the record describing what was asked for.
+    // A RE-OPEN OF THE SAME EPISODE HIDES THE TRANSPORT WITH THE REST OF THE
+    // CHROME. This is the one place that knows which item is going to the
+    // player, so the quality switch, the source switch, the reload and the
+    // reconnect cannot disagree about it.
+    setReopening(openedEpRef.current === epNum);
+    openedEpRef.current = epNum;
+    committedEpRef.current = epNum;
+    committedUrlRef.current = source.uri ?? null;
+    committedNonceRef.current = reloadNonce;
+    committedSrcRef.current = srcIndex;
     void player
       .replaceAsync(source)
       .then(() => {
@@ -3041,6 +3393,24 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // loosely; the runtime it wanted was always `player.duration`.)
         const dur = player.duration || 0;
         durationRef.current = dur;
+        /**
+         * A QUEUED ADVANCE BELONGS TO THE END OF THE ITEM.
+         *
+         * `playToEnd` queues the next episode and the card counts down for five
+         * seconds. Nothing used to withdraw that queue when the viewer went
+         * BACK into the episode (a scrub to rewatch the last minute, a skip
+         * back, a rewind after the card appeared) — so the countdown kept
+         * running and changed the episode under a viewer who had just decided
+         * to stay. The playhead is the evidence: a tick that lands more than a
+         * few seconds before the end means the item did not end, it was
+         * rewound, and the queue is stale.
+         *
+         * The card clears, and so does the parked-finale flag: ▶ after a rewind
+         * is a resume, not the restart-from-zero tap the ended state arms.
+         */
+        if (upNextRef.current != null && dur > 0 && p.currentTime < dur - 5) {
+          withdrawAdvance();
+        }
         // Presence: the first tick that knows the duration is when the card
         // can finally carry its start/end timestamps (the progress bar).
         // Everything before it is a bar-less "elapsed count".
@@ -3130,6 +3500,14 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         if (seekIssuedAtRef.current !== 0 && Date.now() - seekIssuedAtRef.current > 400) {
           seekIssuedAtRef.current = 0;
           setSeekPending((previous) => (previous ? false : previous));
+        }
+
+        // THE RESUME SEEK'S END, on the same evidence: a tick arriving
+        // outside the issue window means frames are being produced at the
+        // new playhead, so the cover hands over to the real transport.
+        if (resumeSeekIssuedAtRef.current !== 0 && Date.now() - resumeSeekIssuedAtRef.current > 400) {
+          resumeSeekIssuedAtRef.current = 0;
+          setResumeSeeking(false);
         }
 
         // A TICK IS A MOVING PICTURE. `timeUpdate` only arrives while frames are
@@ -3405,7 +3783,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       clearInterval(cueTimer);
       for (const s of subs) s.remove();
     };
-  }, [player, animeId, epNum, pushPresence, applyResumePosition, readHealth, loadResumeOnce, showCueAt, prefetchNextEpisode]);
+  }, [player, animeId, epNum, pushPresence, applyResumePosition, readHealth, loadResumeOnce, showCueAt, prefetchNextEpisode, withdrawAdvance]);
 
   // Everything that is per-MEDIA-ITEM rather than per-episode, cleared in one
   // place. Two effects used to reset `playedRef` and `autoSkippedOpening`
@@ -3544,6 +3922,25 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       const out = new Map<number, HlsVariant[] | null>();
       await Promise.all(
         indexes.map(async (i) => {
+          /**
+           * ⚠️ A PROGRESSIVE SOURCE HAS NO LADDER, AND ASKING IT FOR ONE
+           * DOWNLOADS THE EPISODE.
+           *
+           * `listVariants` reads the URL with `fetchText`, which drains the
+           * whole body under a 12s deadline. For an HLS master that is a few
+           * kilobytes; for an mp4 (Mega rows really are mp4s) it is the video
+           * file — over the radio, on the connection the player is loading that
+           * same file from, for a list that cannot exist. The probe path already
+           * learned this (HEAD instead of a ranged GET); the gather never did.
+           *
+           * `[]` and not `null`: the read SUCCEEDED and found no rungs, so the
+           * sheet says 'this episode plays as Auto' rather than 'could not read
+           * the list', and `gatherTriedRef` keeps it from being asked again.
+           */
+          if (list[i].container !== 'hls') {
+            out.set(i, []);
+            return;
+          }
           try {
             out.set(i, await listVariants(list[i].url, list[i].headers ?? {}));
           } catch {
@@ -3584,6 +3981,31 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       }
 
       const stillFailing = failed.length > 0 && ok === 0;
+      /**
+       * THE VIEWER'S RUNG IS A LABEL, NOT AN INDEX.
+       *
+       * `qualitySel` is `{src, v}` because the media effect needs an index into
+       * the active ladder — but that ladder is REBUILT (sorted by bandwidth) on
+       * every gather: a Refresh, a reconnect, a token that re-minted. When the
+       * order shifts, the same index names a different rung, and the chip (which
+       * reads the index from the NEW list) ends up advertising a height the item
+       * was never opened at. Re-seat the index from the label the selection
+       * actually stood for, so the chip and the picture cannot disagree.
+       *
+       * Only when that label is still offered. A rung that has disappeared is
+       * left alone here rather than dropping the viewer to Auto mid-episode —
+       * `qualityPref` carries the label for the next open.
+       */
+      const sel = qualitySelRef.current;
+      const priorLabel = sel ? variantsRef.current[sel.src]?.[sel.v]?.label : undefined;
+      const nextList = sel ? by[sel.src] : undefined;
+      if (sel && priorLabel && nextList?.length) {
+        const at = nextList.findIndex((v) => v.label === priorLabel);
+        if (at >= 0 && at !== sel.v) {
+          qualitySelRef.current = { src: sel.src, v: at };
+          setQualitySel(qualitySelRef.current);
+        }
+      }
       if (stillFailing) {
         variantsLoadedRef.current = variantsLoadedRef.current || Object.keys(by).length > 0;
         setVariantsBySource(by);
@@ -3818,6 +4240,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         setQualitySel(qualitySelRef.current);
         return;
       }
+      // THE VIEWER'S SOURCE IS NOT A SUGGESTION.
+      //
+      // This loop is the OPEN case (episode start, no pick yet). After an
+      // explicit pick it must not run: see `sourceChosenRef`.
+      if (sourceChosenRef.current) return;
       for (let si = 0; si < sourcesRef.current.length; si++) {
         const vi = findLabel(si, label);
         if (vi >= 0) {
@@ -3857,6 +4284,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         return;
       }
       armResume();
+      sourceChosenRef.current = true;
       // Picking a SERVER is not picking Auto. The rung this show plays moves
       // with the viewer to the source they chose.
       const carried = qualityForSource(i);
@@ -3915,6 +4343,26 @@ const applyResumePosition = useCallback((resumeAt: number) => {
        * is the only thing left standing.
        */
       if (!firstFrameRef.current) return;
+      /**
+       * ═══ THE SWITCH WINDOW IS INVISIBLE TO THE HEALTH MONITOR (25 Nov) ═══
+       *
+       * `firstFrameRef` is reset when a new LIST lands, not when the viewer asks
+       * for a new episode — so between `goToEpisode` and the resolve, it is
+       * still TRUE from the episode that just ended. The player is paused with
+       * its playhead parked at the end, the viewer's intent is still true, and
+       * the monitor therefore reads a frozen picture and, at 15s, a stall.
+       *
+       * That is when the recovery ladder used to act on the wrong item: it
+       * `reload`ed the episode being left (`reloadNonce`), or hopped its source,
+       * while the switch was still resolving. It only needed the resolve to take
+       * longer than the stall window, which is exactly what a connection that
+       * just had a hiccup does — "the first next was fine, the one after the
+       * hiccup froze on the scrape stage".
+       *
+       * A switch has its own watchdog and its own failure card. Nothing here
+       * should vote on it.
+       */
+      if (mediaSwitchRef.current) return;
       // Off-screen: nothing is watching, and a sample taken from a throttled
       // timer answers a question about the app, not about the stream.
       if (!appActiveRef.current) return;
@@ -4362,7 +4810,20 @@ const applyResumePosition = useCallback((resumeAt: number) => {
   const goToEpisode = useCallback(
     (n: number) => {
       if (!Number.isInteger(n) || n < 1 || n === epNum) return;
-      setUpNext(null);
+      withdrawAdvance();
+      /**
+       * THE SHEETS DESCRIBE THE ITEM BEING LEFT.
+       *
+       * The up-next card is drawn UNDER the sheets, so a countdown can fire
+       * while the episode panel or the settings drill-in is open — and the
+       * switch would then happen behind a panel still listing the previous
+       * episode's rows, with "playing" against the wrong number. Every real
+       * player dismisses its sheet on a transition; so does this one, for the
+       * countdown as much as for a tap.
+       */
+      setMenu(null);
+      setPanelOpen(false);
+      setCustomSpeedOpen(false);
       mediaSwitchRef.current = true;
       setSwitchPending(true);
       desiredPlayingRef.current = true;
@@ -4378,7 +4839,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       }
       router.setParams({ ep: String(n) });
     },
-    [player, epNum]
+    [player, epNum, withdrawAdvance]
   );
 
   /**
@@ -4393,12 +4854,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     (n: number) => {
       // A manual pick outranks a queued auto-advance: the viewer said where
       // they want to go, and a countdown finishing a beat later would jump them
-      // to the episode they just left.
-      setUpNext(null);
+      // to the episode they just left. That covers PREV (and the panel's rows)
+      // as well as NEXT — every one of them arrives here.
+      withdrawAdvance();
       setPanelOpen(false);
       goToEpisode(n);
     },
-    [goToEpisode]
+    [goToEpisode, withdrawAdvance]
   );
 
   const onPrev = useCallback(() => {
@@ -4470,6 +4932,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       armResume();
       qualitySelRef.current = null;
       setQualitySel(null);
+      sourceChosenRef.current = true;
       setSrcIndex((i + 1) % sourcesRef.current.length);
     } else {
       void load({ fresh: true });
@@ -4730,6 +5193,12 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // parked-finale flag: once the playhead is off the end — a restart from 0,
       // a scrub back, a resume — the engine is no longer in its ended state, so
       // a later ▶ must play rather than rewind.
+      //
+      // AND THE ONE PLACE TO WITHDRAW A QUEUED ADVANCE. A seek is a decision to
+      // stay in this episode, and this is the only function every viewer seek
+      // goes through (scrub release, double-taps, skip buttons, the ▶ restart),
+      // so no future seek path can forget the rule.
+      withdrawAdvance();
       endedRef.current = false;
       // A VIEWER'S OWN SEEK REPLACES A PENDING RESTORE. A reload arms the
       // position to return to and applies it when the first frame lands; if
@@ -4766,7 +5235,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         showCueAt(target);
       }
     },
-    [readHealth, pushPresence, player, showCueAt]
+    [readHealth, pushPresence, player, showCueAt, withdrawAdvance]
   );
 
   /**
@@ -5024,10 +5493,15 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * cannot advance into the wrong episode.
    */
   const onAdvance = useCallback(() => {
-    const next = upNext;
-    setUpNext(null);
-    if (next != null) goToEpisode(next);
-  }, [upNext, goToEpisode]);
+    // THE REF, NOT THE STATE. A withdrawal (a rewind, ▶, a pick) nulls the ref
+    // in the same tick it happens, while `upNext` only catches up on the next
+    // commit — so reading state here left a one-tick window in which a
+    // countdown that had just been cancelled could still change the episode.
+    const next = upNextRef.current;
+    if (next == null) return;
+    withdrawAdvance();
+    goToEpisode(next);
+  }, [goToEpisode, withdrawAdvance]);
 
   /**
    * Cancel is a DECISION, and the player has to agree with it. The stream is at
@@ -5035,10 +5509,13 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * that is still true — the same two flips the parked finale does.
    */
   const onCancelAdvance = useCallback(() => {
-    setUpNext(null);
+    // Cancel is the explicit "no": the card goes (through the ref, so a
+    // countdown already in flight cannot advance) and the item stays parked at
+    // its end, where ▶ replays rather than computing “pause”.
+    withdrawAdvance();
     desiredPlayingRef.current = false;
     endedRef.current = true;
-  }, []);
+  }, [withdrawAdvance]);
 
   /**
    * ANDROID BACK BELONGS TO THE LAYER ON TOP, NOT TO THE ROUTE.
@@ -5150,11 +5627,14 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       // to the top first, through the grace wrapper so the ring shows and
       // the seek's own bookkeeping is kept; it also clears `endedRef`,
       // which is exactly right now that we are leaving the end behind.
+      // PRESSING ▶ AT THE END IS SAYING "STAY". Whatever the card was counting
+      // down to is no longer what the viewer asked for.
+      withdrawAdvance();
       if (endedRef.current) seekWithGrace(() => { player.currentTime = 0; }, 0);
       player.play();
     }
     pokeControls();
-  }, [player, pokeControls, seekWithGrace, animeId, epNum, linkOk]);
+  }, [player, pokeControls, seekWithGrace, animeId, epNum, linkOk, withdrawAdvance]);
   const subsStyleProp = useMemo(
     () => ({
       size: subsSize,
@@ -5261,6 +5741,18 @@ const applyResumePosition = useCallback((resumeAt: number) => {
     const hadError = errorRef.current != null;
     const blocked = offlineBlockedRef.current;
     offlineBlockedRef.current = false;
+    /**
+     * A RECONNECT DURING A SWITCH MUST NOT ACT.
+     *
+     * `sourcesRef` still holds the episode being left, so both branches below
+     * would reload THAT item — and, worse, the position arming under them would
+     * carry the OLD episode's playhead into the new one's resume
+     * (`pendingSeek`), which is the "next episode started at the minute I was
+     * on in the last one" shape. The switch's own `load()` is already the
+     * attempt the reconnect is asking for, so this only clears the flags it has
+     * just consumed and returns.
+     */
+    if (mediaSwitchRef.current) return;
 
     // WHERE WERE WE? Three answers, and the LARGEST one is the truth:
     // `player.currentTime` is the live playhead (0 when a failed replace reset
@@ -5328,7 +5820,34 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * worse than a frame of chrome appearing early.
    */
   const pictureUp = firstFrame || playbackProgress;
-  const stageUp = (!pictureUp || switchPending) && !error && !offline && desiredPlayingRef.current;
+  /**
+   * THE COVER, WITHOUT THE INTENT GATE (25 Nov).
+   *
+   * `stageUp` is the intent-gated half, and it has to exist: the stage takes the
+   * chrome and the gesture surface, so an episode the viewer PAUSED mid-scrape
+   * would otherwise be a cover with no way to reach ▶. But the cover is also the
+   * honest thing to show before there is a picture, and tying that to intent
+   * meant a pause during the initial load dropped the stage and left the chrome
+   * sitting over a black frame with a 0:00 timeline. Two names, one condition:
+   * `loadStageUp` draws (and hides the bars that would describe nothing yet),
+   * `stageUp` gates the controls.
+   *
+   * `resumeSeeking` joins the cover (25 Nov): a re-open renders its opening
+   * frame and only then seeks to the position the viewer was at, so without
+   * it the chrome appears over a player that is still jumping backwards.
+   */
+  const loadStageUp = (!pictureUp || switchPending || resumeSeeking) && !error && !offline;
+  const stageUp = loadStageUp && desiredPlayingRef.current;
+
+  /**
+   * THE TRANSPORT COMES DOWN WITH THE CHROME WHEN THE COVER IS A RE-OPEN.
+   *
+   * NOT `loadStageUp` alone: that would also take ▶ away from the first open of
+   * an episode the viewer paused before it started — the one case the transport
+   * is kept for. NOT `reopening` alone either: it stays set until the next open,
+   * so it would take the transport away for the rest of the episode.
+   */
+  const transportCovered = reopening && loadStageUp;
 
   /**
    * SHOULD THE DISPLAY STAY LIT?
@@ -5366,19 +5885,58 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * stack, and a player left behind must not light the display on
    * home/details. PiP keeps the screen on through the OS media session.
    */
+  /**
+   * ═══ ONE NATIVE WRITE PER CHANGE (25 Nov) ═══
+   *
+   * `keepScreenOnWhilePlaying = true` is NOT idempotent in expo-video's Android
+   * implementation (verified in the shipped source, not assumed): every write
+   * of `true` runs `VideoPlayerKeepAwake.enable()`, which builds a NEW
+   * ExoPlayer `Player.Listener` and adds it, then overwrites its single
+   * `playerListener` field. The previous listener can therefore never be
+   * removed — `disable()` only removes the newest one. It is a listener leak,
+   * and every leaked listener calls `VideoManager.requestKeepAwake` /
+   * `releaseKeepAwake` on each play-state change.
+   *
+   * This screen writes the flag from two effects, and `screenAwake` flips
+   * several times across a switch (the pause `goToEpisode` performs, the stage
+   * rising, the first frame landing). A binge therefore accumulated a listener
+   * per flip on the exact path that is already fragile. Comparing first means
+   * the native player is touched only when the answer really changes.
+   *
+   * The try/catch is the release guard: this runs from a focus cleanup too, and
+   * a released player must never turn "leaving the screen" into a throw.
+   */
+  const awakeWrittenRef = useRef<boolean | null>(null);
+  const writeKeepAwake = useCallback(
+    (on: boolean) => {
+      if (awakeWrittenRef.current === on) return;
+      awakeWrittenRef.current = on;
+      try {
+        player.keepScreenOnWhilePlaying = on;
+      } catch {
+        /* the native player may already be released */
+      }
+    },
+    [player]
+  );
+  const screenAwakeRef = useRef(screenAwake);
+  screenAwakeRef.current = screenAwake;
   useFocusEffect(
     useCallback(() => {
       focusedRef.current = true;
-      player.keepScreenOnWhilePlaying = screenAwake;
+      // A re-focus re-asserts the CURRENT answer — the effect below only runs
+      // on a change, and this callback can follow a blur that released the
+      // lock. `writeKeepAwake`'s own memory makes the no-op case free.
+      writeKeepAwake(screenAwakeRef.current);
       return () => {
         focusedRef.current = false;
-        player.keepScreenOnWhilePlaying = false;
+        writeKeepAwake(false);
       };
-    }, [player, screenAwake])
+    }, [writeKeepAwake])
   );
   useEffect(() => {
-    if (focusedRef.current) player.keepScreenOnWhilePlaying = screenAwake;
-  }, [player, screenAwake, playing]);
+    if (focusedRef.current) writeKeepAwake(screenAwake);
+  }, [screenAwake, writeKeepAwake]);
 
   /**
    * ONE LAYER AT A TIME — the stage REPLACES the controls; it does not sit
@@ -5405,7 +5963,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
    * keeps its `off` mode (arrow only, at its own seat, with the contrast disc
    * the gradient used to provide).
    */
-  const controlsOff = switching || stageUp;
+  const controlsOff = switching || loadStageUp;
 
   const buffering =
     desiredPlayingRef.current &&
@@ -5471,11 +6029,11 @@ const applyResumePosition = useCallback((resumeAt: number) => {
       {/* No scrim behind the stage: its gradients exist to keep the title and
           the timeline readable over a live frame, and during a load there is
           neither — they would just dim the art the stage is already dimming. */}
-      {stageUp ? null : (
+      {loadStageUp ? null : (
         <Scrim locked={locked} panelOpen={panelOpen} menu={menu} scrubActive={scrubActive} />
       )}
 
-      {stageUp ? (
+      {loadStageUp ? (
         <LoadingStage
           // Banner first: it is the widest art AniList has, and at 50% opacity
           // behind a 74% wash only the colour field survives anyway.
@@ -5538,7 +6096,7 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         // must not show without a word. The seek's own issue is the honest
         // signal; the ring clears from the `timeUpdate` listener the moment
         // frames resume.
-        buffering={buffering && !stageUp}
+        buffering={buffering && !loadStageUp}
         hasPrev={epNum > 1}
         // Aired, not the season total: ⏭ must dim on the last RELEASED episode
         // of an airing show, exactly where the countdown declines to fire.
@@ -5546,7 +6104,10 @@ const applyResumePosition = useCallback((resumeAt: number) => {
         onPlayPause={onPlayPause}
         onPrev={onPrev}
         onNext={onNext}
-        off={controlsOff}
+        // NOT `controlsOff`: a paused load keeps the cover up but the transport
+        // has to stay reachable, or ▶ is missing from the one state that needs
+        // it.
+        off={switching || stageUp || transportCovered}
       />
 
       <BottomBar

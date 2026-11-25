@@ -253,6 +253,41 @@ async function main() {
     );
   }
 
+  console.log('\nthe rich-presence switch stays OFF (25 Nov)');
+  {
+    capture().length = 0;
+    memStore.clear();
+    KEYCHAIN.clear();
+    const presence = await freshPresence();
+    // A session that predates the switch: a saved token, no stored CHOICE.
+    check(
+      'no stored choice reads as null, not "off"',
+      (await presence.readPresenceChoice()) === null
+    );
+    await presence.saveDiscordToken('tok');
+    await presence.setPresenceEnabled(false);
+    check(
+      'an explicit OFF is a choice, not an absence',
+      (await presence.readPresenceChoice()) === false
+    );
+    check('…and it reads as disabled', (await presence.isPresenceEnabled()) === false);
+    /**
+     * THE REGRESSION. `GatewayView`'s reader used to say
+     * `if (!isPresenceEnabled()) setPresenceEnabled(true)` — and
+     * `setPresenceEnabled` publishes a credential change, which re-ran that
+     * very reader. Turning the switch off therefore turned it back on a tick
+     * later, and every browsing frame kept flowing to Discord.
+     */
+    await presence.updateBrowsing('Should Not Appear');
+    await presence.updatePresence('Should Not Appear', 1);
+    await sleep(450);
+    check(
+      'no frame reaches the gateway while presence is off',
+      capture().length === 0,
+      `sent ${capture().length}`
+    );
+  }
+
   console.log('');
   if (failures) {
     console.log(`FAILED: ${failures} check(s)`);

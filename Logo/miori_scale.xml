@@ -1,29 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    THE GROUP: a small settle during the intro, then the pulse that keeps the
-    splash alive while the app finishes starting.
+    THE GROUP: an unfurl during the intro, and NOTHING afterwards.
 
-    THE SETTLE IS 0.94 -> 1 OVER 880ms, not 0.9 -> 1 over 1400ms. The old
-    duration was longer than Android's ~1s animation budget, so the icon was
-    frozen mid-zoom at whatever frame the system stopped on — the "it's zoomed
-    in" half of the report. 0.94 is also all the travel a splash logo needs;
-    the larger 0.9 start reads as a lurch on a icon this dense.
+    0.94 → 1 and -4° → 0 over 240 - 960 ms. The scale is small on purpose: on a
+    dense mark a big zoom reads as a lurch, and the previous 0.9 over a 1400 ms
+    duration was cut mid-zoom by the system, which is the "it's zoomed in"
+    report. The few degrees of rotation are what make the arrival feel alive
+    instead of merely bigger; both settle exactly on the artwork's own centre
+    (pivot 350,350), so nothing drifts.
 
-    1.025 IS THE MOST THE PULSE MAY GROW. The artwork is fit to 0.68 of the
-    viewport so its furthest ink sits at 218 units against the mask's 233
-    (`ic_miori_logo.xml` documents the measurement). 218 x 1.025 = 223, still
-    inside the circle; anything past 1.07 starts shaving the M's tips again.
+    ⚠️ THERE IS NO LOOPING SCALE HERE ANY MORE, AND THAT IS THE POINT. A 1.025
+    breathing bump was the old idle, and it is the "breathing scale is not good"
+    report: the artwork is dense, so the bump reads as jitter, and it also spends
+    the fit margin against the circular splash mask. The idle is a rim-light
+    swell now — see `miori_stroke.xml` — so the mark is perfectly still while the
+    app starts, and the mask margin is no longer a function of an idle amplitude.
+
+    960 ms is Android's budget for a splash icon animation (≈1000 ms); it is also
+    `SPLASH.nativeAnimationMs`, which `app/_layout.tsx` waits out before hiding
+    the splash, so this settle always plays to its end.
 -->
 <set xmlns:android="http://schemas.android.com/apk/res/android"
     android:ordering="together">
 
-    <!-- 1) the settle, inside the system's animation budget: 0 - 880 ms -->
     <objectAnimator
         android:propertyName="scaleX"
         android:valueFrom="0.94"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="880"
+        android:startOffset="240"
+        android:duration="720"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
 
     <objectAnimator
@@ -31,29 +37,17 @@
         android:valueFrom="0.94"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="880"
+        android:startOffset="240"
+        android:duration="720"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
 
-    <!-- 2) the breathing pulse, paired with the fill's: forever, from the intro's end -->
+    <!-- the unfurl: a few degrees, easing back to level -->
     <objectAnimator
-        android:propertyName="scaleX"
-        android:valueFrom="1"
-        android:valueTo="1.025"
+        android:propertyName="rotation"
+        android:valueFrom="-4"
+        android:valueTo="0"
         android:valueType="floatType"
-        android:startOffset="880"
-        android:duration="1100"
-        android:repeatCount="-1"
-        android:repeatMode="reverse"
-        android:interpolator="@android:interpolator/accelerate_decelerate" />
-
-    <objectAnimator
-        android:propertyName="scaleY"
-        android:valueFrom="1"
-        android:valueTo="1.025"
-        android:valueType="floatType"
-        android:startOffset="880"
-        android:duration="1100"
-        android:repeatCount="-1"
-        android:repeatMode="reverse"
-        android:interpolator="@android:interpolator/accelerate_decelerate" />
+        android:startOffset="240"
+        android:duration="720"
+        android:interpolator="@android:interpolator/fast_out_slow_in" />
 </set>

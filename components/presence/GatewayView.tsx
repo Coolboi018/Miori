@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewRef, type WebViewErrorEvent, type WebViewHttpErrorEvent } from 'react-native-webview';
-import { getDiscordToken, isPresenceEnabled, setPresenceEnabled, subscribeDiscordCredentials } from '@/lib/presence/discord';
+import {
+  getDiscordToken,
+  isPresenceEnabled,
+  readPresenceChoice,
+  setPresenceEnabled,
+  subscribeDiscordCredentials,
+} from '@/lib/presence/discord';
 import { applyAccountStatus } from '@/lib/presence/accountStatus';
 import { subscribeSettings, readSetting } from '@/lib/settings/store';
 import {
@@ -370,10 +376,24 @@ export function GatewayView() {
       try {
         const t = await getDiscordToken();
         if (!t) { if (live) setToken(null); return; }
-        // Auto-enable presence for any logged-in account: a saved token means
-        // the user wants RPC. (Privacy opt-in proved too error-prone.)
+        /**
+         * Auto-enable ONLY a session that predates the switch.
+         *
+         * A saved token with NO stored choice means the user logged in before
+         * there was anything to opt out of, and migrating that to "on" is the
+         * intent. An EXPLICIT off is a decision and is never overridden — this
+         * used to read `isPresenceEnabled()`, where "off" and "never asked"
+         * are the same `false`, and the credential change that
+         * `setPresenceEnabled(false)` publishes re-ran this very reader: turn
+         * the switch off, and the app turned it back on a tick later, then kept
+         * pushing browsing frames (25 Nov report: "I turned rich presence off
+         * and Discord still shows it").
+         */
         let on = await isPresenceEnabled();
-        if (!on) { await setPresenceEnabled(true); on = true; }
+        if (!on && (await readPresenceChoice()) === null) {
+          await setPresenceEnabled(true);
+          on = true;
+        }
         if (!live) return;
         setToken(on ? t : null);
       } catch {

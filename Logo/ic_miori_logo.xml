@@ -19,9 +19,12 @@
 
         `logo_fit` scales the whole thing by 0.68 about the artwork's own centre
         (see the bbox below), which puts the furthest ink at 0.68 x 321 = 218
-        units — inside 233 even at the idle pulse's 1.025 peak. It is a static
-        group; the animated one stays `logo_group`, so the AVD targets and the
-        choreography do not move.
+        units — inside 233 with the intro's own settle, which only ever scales
+        UP from 0.94 to 1 and then stops. (There is no idle scale any more; the
+        mask check reads every scale animator's peak from `Logo/miori_*.xml`
+        rather than trusting a constant here.) It is a static group; the
+        animated one stays `logo_group`, so the AVD targets and the choreography
+        do not move.
 
         The alternative was to enlarge `imageWidth`: it scales the mask with the
         icon, so the clipping ratio would not change at all. Only the artwork

@@ -438,6 +438,22 @@ function main() {
     /number=\{locked \? null : upNext\}/.test(player),
     'a pocket tap on "Play now" would change the episode with no viewer present'
   );
+  check(
+    'going BACK into the episode withdraws the queued advance',
+    /upNextRef\.current != null && dur > 0 && p\.currentTime < dur - 5/.test(player) &&
+      /upNextRef\.current = null;[\s\S]{0,80}setUpNext\(null\)/.test(player),
+    'the card kept counting after a rewind and changed the episode under a viewer who had decided to stay'
+  );
+  check(
+    'a switch dismisses the sheets before it changes the episode',
+    /setMenu\(null\);\s*setPanelOpen\(false\);\s*setCustomSpeedOpen\(false\);/.test(player),
+    'the countdown fires under the panel/settings sheet, leaving it listing the previous episode as "playing"'
+  );
+  check(
+    '…and a seek, a scrub grip, ▶, NEXT and PREV all withdraw it',
+    (player.match(/withdrawAdvance\(\)/g) ?? []).length >= 4,
+    'a seek against an ENDED item does not reliably tick, so dragging the timeline back from the end was the one rewind the playhead rule missed'
+  );
 
   console.log(failures ? `\n${failures} failed\n` : '\nall passed\n');
   process.exit(failures ? 1 : 0);

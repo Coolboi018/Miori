@@ -380,6 +380,17 @@ verify(
   /!recoveryOpenRef\.current/.test(screen) && /recoveryOpenRef\.current = false/.test(screen),
   'preparing a cached source takes CacheVariantIndex\'s @Synchronized lock on the Android main thread'
 );
+// THE 25 NOV REPORT — a hiccup, then the NEXT episode froze on the scrape stage.
+verify(
+  'no automatic remedy can touch the item a switch is leaving',
+  (screen.match(/if \(mediaSwitchRef\.current\) return;/g) ?? []).length >= 3,
+  'the tick, the ladder, the walk and the frame watchdog all ran with the PREVIOUS episode sources; a reload or hop there replaces the item being left while the next source is preparing'
+);
+verify(
+  'an EPISODE SWITCH bypasses the disk cache too',
+  /const episodeSwitch = mediaSwitchRef\.current/.test(screen) && /!episodeSwitch/.test(screen),
+  'a switch prepares the next source on the main thread while the paused item may still be downloading — the same CacheVariantIndex lock the recovery fix covers'
+);
 verify(
   'the silence verdict is bounded per item, per URL and per episode',
   /positionRef\.current > SILENCE_MAX_POSITION_S/.test(screen) &&
@@ -490,7 +501,8 @@ section('8. separate audio + the ABR ceiling');
   verify(
     'the screen never loads a bare variant of a separate-audio master (that is the silent picture)',
     /const separateAudio = !!list\?\.length && list\[0\]\?\.separateAudio === true/.test(screen) &&
-      /const variantUrl = picked && !separateAudio/.test(screen),
+      /const ceilingOnly = !!picked && \(separateAudio \|\|/.test(screen) &&
+      /const variantUrl = picked && !ceilingOnly/.test(screen),
     'Katana: video, no sound, no error'
   );
   /**
@@ -506,8 +518,19 @@ section('8. separate audio + the ABR ceiling');
     /const recoverStream = useCallback[\s\S]*?recoverStreamRef\.current = recoverStream/.exec(screen)?.[0] ?? '';
   verify(
     'a picked rung on a separate-audio master is applied as a ceiling',
-    /player\.maxResolution = separateAudio \? capFor\(picked\) : null/.test(screen),
+    /player\.maxResolution = ceilingOnly \? capFor\(picked\) : null/.test(screen),
     'a variant swap both mutes the picture and throws away the buffer'
+  );
+  verify(
+    'a run with nothing new to open never re-opens the item',
+    /const sameAttempt =[\s\S]{0,700}?committedUrlRef\.current === targetUrl/.test(screen),
+    'the remembered rung arrived as a second `replaceAsync` a second after every switch — a visible re-buffer, and the last window in which two prepares could overlap'
+  );
+  verify(
+    'one resolve at a time, with a bounded handoff',
+    /const handoff = Promise\.race\(\[[\s\S]{0,160}?resolveChainRef\.current\.then/.test(screen) &&
+      /resolveChainRef\.current = resolvePromise\.catch/.test(screen),
+    'a switch mid-resolve left both episodes probing the same hosts, so a slow connection paid for two searches'
   );
   verify(
     'the recovery path never touches quality or the ABR ceiling (24 Nov report)',
@@ -536,6 +559,18 @@ section('8. separate audio + the ABR ceiling');
     'the silence verdict is cancelled by a source change',
     /sourcesRef\.current\[srcIndexRef\.current\] !== sourceAtFrame/.test(screen),
     'otherwise the next source is blamed for this one being silent'
+  );
+
+  verify(
+    'the quality gather never fetches a progressive source as a playlist',
+    /container !== 'hls'[\s\S]{0,200}out\.set\(i, \[\]\)/.test(screen),
+    'listVariants drains the whole body: on an mp4 that is the episode itself, over the radio, while the player loads that same file'
+  );
+  verify(
+    'a re-read keeps the picked rung on its LABEL, not its index',
+    /variantsRef\.current\[sel\.src\]\?\.\[sel\.v\]\?\.label/.test(screen) &&
+      /nextList\.findIndex\(\(v\) => v\.label === priorLabel\)/.test(screen),
+    'a gather rebuilds and re-sorts the ladder; an index that survives the rebuild names a different rung than the chip does'
   );
 
   const filmu = readFileSync(`${ROOT}/lib/extensions/filmu/index.ts`, 'utf8');

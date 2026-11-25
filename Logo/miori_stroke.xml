@@ -1,49 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    THE OUTLINE: draws itself, then hands over to the solid fill.
+    THE RIM: draws the mark, then settles into the halo that breathes while the
+    app finishes starting.
 
-    Every animator here finishes at 880ms, inside Android's ~1000ms guidance for
-    a splash icon animation (a longer one gets cut, and a cut leaves a
-    half-drawn logo on screen). The end of the intro is ALSO the number in
-    `lib/ui/splash.ts` (`nativeAnimationMs`) and in the plugin's
-    `windowSplashScreenAnimationDuration` — `scripts/check-splash.ts` asserts
-    the three agree.
+    ⚠️ 25 Nov — ONE CONTINUOUS 960 ms MOVE, NOT A DRAW FOLLOWED BY A BUMP.
+
+    The previous version finished the outline in 680 ms and then handed over to
+    a breathing SCALE pulse on the whole group. That pulse is the "breathing
+    looks wrong" report, and the reason is in the artwork: this mark is dense, so
+    a 2.5% bump on it reads as jitter rather than as breathing, and pairing it
+    with a fill that dimmed to 78% made the logo itself look like it was
+    flickering. Nothing on the artwork moves after it lands now. The only thing
+    that keeps moving is this thin rim light — a slow, shallow swell between 30%
+    and 55% white — which reads as a halo, not as the logo pulsing.
+
+    THE INTRO IS A PEN, NOT A PROGRESS BAR. `trimPathEnd` draws the outline with
+    `fast_out_slow_in` (fastest at the start, easing into the end) while
+    `strokeWidth` thins from 7 to 4.5 over the same window: the stroke arrives
+    thick and leaves a fine line behind, which is what makes the draw read as a
+    hand moving rather than a bar filling. The fill (see `miori_fill.xml`) starts
+    at 360 ms, well before the draw ends at 620 ms, so the silver is already
+    rising under the line instead of waiting for it — one move, no seam.
+
+    Every animator here ends at or before 960 ms, inside Android's ~1000 ms
+    guidance for a splash icon animation (a longer one is cut, and a cut leaves a
+    half-drawn logo on screen). The end of the intro is ALSO
+    `SPLASH.nativeAnimationMs` and the plugin's
+    `windowSplashScreenAnimationDuration` — `scripts/check-splash.ts` asserts all
+    three agree, and `app/_layout.tsx` refuses to hide the splash until that time
+    has elapsed, so a fast JS start can no longer truncate the draw.
 
     THE FIRST ANIMATOR HOLDS strokeAlpha AT 1 FOR THE WHOLE DRAW. The drawable's
-    static `strokeAlpha` is 0 because the finished logo has no outline, but the
-    intro needs the outline visible while `trimPathEnd` travels. An animator
-    that simply faded from 1 at 600ms would leave the first 600ms invisible
-    (the property would still be at its static 0), so the hold is not padding:
-    without it the "draw" happens on an invisible stroke.
+    static `strokeAlpha` is 0 (the finished mark has no outline), so without the
+    hold the "draw" would happen on an invisible stroke — the property would sit
+    at its static 0 until the settle animator claimed it at 760 ms.
 -->
 <set xmlns:android="http://schemas.android.com/apk/res/android"
     android:ordering="together">
 
-    <!-- 1) the outline is visible from frame zero, and stays visible while it draws -->
+    <!-- 1) the rim is visible from frame zero and stays visible while it draws -->
     <objectAnimator
         android:propertyName="strokeAlpha"
         android:valueFrom="1"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="600"
+        android:duration="760"
         android:interpolator="@android:interpolator/linear" />
 
-    <!-- 2) the outline draws itself: 0 - 680 ms -->
+    <!-- 2) the outline draws itself: 0 - 620 ms -->
     <objectAnimator
         android:propertyName="trimPathEnd"
         android:valueFrom="0"
         android:valueTo="1"
         android:valueType="floatType"
-        android:duration="680"
+        android:duration="620"
         android:interpolator="@android:interpolator/fast_out_slow_in" />
 
-    <!-- 3) the outline fades away as the silver fill arrives: 600 - 880 ms -->
+    <!-- 3) the pen lifts: thick at the grip, fine at the end — 0 - 620 ms -->
+    <objectAnimator
+        android:propertyName="strokeWidth"
+        android:valueFrom="7"
+        android:valueTo="4.5"
+        android:valueType="floatType"
+        android:duration="620"
+        android:interpolator="@android:interpolator/fast_out_slow_in" />
+
+    <!-- 4) the rim relaxes into a halo as the fill lands: 760 - 960 ms -->
     <objectAnimator
         android:propertyName="strokeAlpha"
         android:valueFrom="1"
-        android:valueTo="0"
+        android:valueTo="0.3"
         android:valueType="floatType"
-        android:startOffset="600"
-        android:duration="280"
+        android:startOffset="760"
+        android:duration="200"
         android:interpolator="@android:interpolator/linear" />
+
+    <!--
+        5) the halo breathes until the app is ready: 960 ms → forever.
+
+        `valueFrom` is EXACTLY the settle's `valueTo`, so the loop starts on the
+        frame the intro ends at with no jump. 1800 ms per half is slow enough to
+        read as breathing (a 1100 ms cycle read as a pulse), and 0.55 is a halo:
+        the mark underneath is untouched, so nothing flickers.
+    -->
+    <objectAnimator
+        android:propertyName="strokeAlpha"
+        android:valueFrom="0.3"
+        android:valueTo="0.55"
+        android:valueType="floatType"
+        android:startOffset="960"
+        android:duration="1800"
+        android:repeatCount="-1"
+        android:repeatMode="reverse"
+        android:interpolator="@android:interpolator/accelerate_decelerate" />
 </set>

@@ -134,18 +134,60 @@ function callbackArgs(source: string, declarationStart: string): string {
  * that the extractor really finds the cleanups, against a known one, before
  * trusting it. A rule that cannot fail is not a rule.
  */
+/**
+ * The brace-matched body of the block whose opening `{` sits at `open`.
+ *
+ * A fixed character window was the old heuristic, and it was wrong in both
+ * directions: too short missed a write near the end of a long cleanup, too long
+ * borrowed `player.` writes from the following effect. Matching the braces is
+ * the only version that describes the thing being checked.
+ */
+function blockAt(source: string, open: number): string {
+  let depth = 0;
+  let quote = 0;
+  for (let i = open; i < source.length; i++) {
+    const code = source.charCodeAt(i);
+    if (quote !== 0) {
+      // 92 is a backslash: it escapes the next character of a literal.
+      if (code === 92) i++;
+      else if (code === quote) quote = 0;
+      continue;
+    }
+    // 34 " · 39 ' · 96 ` — the three ways a source file opens a string.
+    if (code === 34 || code === 39 || code === 96) {
+      quote = code;
+      continue;
+    }
+    if (code === 123) depth++;
+    else if (code === 125) {
+      depth--;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  return source.slice(open, open + 800);
+}
+
+/**
+ * Every cleanup the screen can run, in EITHER shape it uses.
+ *
+ * This matched only the bare `useEffect(() => () => {` form and demanded two of
+ * them. When the player's effects were rewritten to the ordinary
+ * `useEffect(() => { … return () => { … } })` shape the file kept exactly ONE
+ * match, so the canary failed on every run — a check nobody can pass is a check
+ * nobody reads. Worse, the rule it guards ("no cleanup writes to the player",
+ * the fix for two real crashes) was silently covering one of eleven cleanups.
+ * Both shapes are extracted now, and the bodies are brace-matched rather than
+ * taken as a fixed window.
+ */
 function cleanupBodies(source: string): string[] {
   const out: string[] = [];
-  const re: RegExp = /=>\s*\(\)\s*=>\s*\{/g;
+  const re: RegExp = /(?:=>\s*\(\s*\)\s*=>|return\s*\(\s*\)\s*=>)\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(source)) !== null) {
-    const start = m.index;
-    const end = source.indexOf('\n  }', start);
-    out.push(source.slice(start, end < 0 ? start + 800 : end));
+    out.push(blockAt(source, m.index + m[0].length - 1));
   }
   return out;
 }
-
 const ALL: SeekPrecision[] = ['exact', 'fast', 'rough'];
 
 // The independent re-implementations used for the mutation tests. Each is a
@@ -408,6 +450,24 @@ console.log('\nthe bar cannot be pulled out from under a finger');
   check('a drag reports itself on release', /onPanResponderRelease[\s\S]{0,400}setScrubbing\(false\)/.test(bar));
   check('a drag reports itself on terminate', /onPanResponderTerminate[\s\S]{0,200}setScrubbing\(false\)/.test(bar));
 
+  // ⚠️ AND THE OVERLAY MUST NOT FADE OUT UNDER THE FINGER. The auto-hide is a
+  // "the viewer stopped interacting" timer, and a finger held on the timeline is
+  // interacting. Every hide path runs through `hideTimerRef`, so a grant that
+  // clears it and arms nothing holds the chrome up, and the release re-arms the
+  // same single countdown through `pokeControls`. Without the hold the overlay
+  // faded mid-drag and — because a hidden bar is touch-transparent — the gesture
+  // was cancelled with it, so the release never committed a seek.
+  check(
+    'a drag holds the chrome up for its whole duration',
+    /onScrubActive = useCallback\([\s\S]{0,2000}clearTimeout\(hideTimerRef\.current\)/.test(screen),
+    'the 3s auto-hide fired mid-drag, faded the overlay and cancelled the gesture'
+  );
+  check(
+    'the release re-arms the one countdown every other interaction uses',
+    /onScrubActive = useCallback\([\s\S]{0,2600}else \{[\s\S]{0,200}pokeControls\(\)/.test(screen),
+    'a bare setChromeVisible(true) keeps the chrome up forever; a release must hide it 3s later'
+  );
+
   const release = /onPanResponderRelease[\s\S]*?onPanResponderTerminate/.exec(bar)?.[0] ?? '';
   check('the release handler was found', release.length > 0, 'an empty match would make the order checks vacuous');
 
@@ -478,6 +538,23 @@ console.log('\na tap commits to the point it was aimed at');
   check(
     'the release commits to the last position the preview was showing',
     /secondsAt\(localXRef\.current\)/.test(release)
+  );
+
+  // ⚠️ AND THAT POSITION IS ONLY BAR-RELATIVE IF THE BAR WAS THE TOUCH TARGET.
+  // `locationX` is relative to the target view, and the knob is a 12pt absolute
+  // child at the playhead: pressing it reported locationX in [0, 12], so
+  // `pageX - locationX` produced the KNOB's page x as the bar's origin and the
+  // bar read the press as a position next to 0:00 — the timeline jumped to the
+  // start on the grip and the release rewound the episode. The knob is out of
+  // the hit test now, so the target is always the measured hit area.
+  check(
+    'the knob is not a touch target, so locationX is the bar-relative one',
+    /<Animated\.View\s+pointerEvents="none"\s+style=\{\[styles\.handle, knobStyle\]\}/.test(bar),
+    'a press on the knob measured locationX inside a 12pt view — the release went to 0:00'
+  );
+  check(
+    'the grant still derives the bar origin from the touched point',
+    /originXRef\.current = e\.nativeEvent\.pageX - e\.nativeEvent\.locationX/.test(bar)
   );
 }
 
